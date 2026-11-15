@@ -6,8 +6,8 @@ import unittest
 import numpy as np
 import warp as wp
 
-from gpu.gs import WarmColors
-from gpu.parallel_colors import ParallelColors
+from gpu.solver import WarmColors
+from gpu.solver import ParallelColors
 
 
 def oracle(n, edges):

@@ -19,7 +19,7 @@ from newton.solvers import SolverVBD
 from newton._src.solvers.solver import SolverBase
 from newton._src.solvers.vbd.particle_vbd_kernels import forward_step
 
-from gpu import kernels
+from gpu import solver as kernels
 from gpu.contact import ContactBackend
 from gpu.ccd import CcdBackend
 from gpu.sdf import SdfBackend

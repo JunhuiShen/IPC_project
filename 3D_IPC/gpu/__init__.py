@@ -51,6 +51,7 @@ def __getattr__(name):
         from .solver_dat import SolverDAT
         return SolverDAT
     if name == "SolverDATReference":
-        from .solver_dat_reference import SolverDATReference
-        return SolverDATReference
+        select_newton_runtime("reference")
+        from newton.solvers import SolverVBD
+        return SolverVBD
     raise AttributeError(name)

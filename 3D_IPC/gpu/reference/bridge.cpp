@@ -1,5 +1,5 @@
 #include "bridge.h"
-#include "general_simd_materials.h"
+#include "general_simd.h"
 #include <algorithm>
 #include <set>
 #include <stdexcept>

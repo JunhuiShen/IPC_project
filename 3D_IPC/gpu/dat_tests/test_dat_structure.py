@@ -35,8 +35,7 @@ REFERENCE_ITERATION = Native._solve_particle_iteration
 
 from gpu import solver_dat as candidate
 from gpu.solver_dat import SolverDAT
-from gpu import dat_material_kernels as material_kernels
-from gpu import dat_materials,energy
+from gpu import dat_energies as energies,energy
 
 
 def dump(node):
@@ -77,8 +76,7 @@ def compiled_candidate_ast():
 
 
 def reverse_energy_edits(tree):
-    counts={'contact':0,'tile':0,'scalar':0,'begin':0,'replay':0,'sdf':0}
-    expected_replay=expression('self._energy_contacts.resolve(state_in.particle_q,self.particle_q_prev,self.model.particle_colors,color,self.particle_forces,self.particle_hessians)')
+    counts={'contact':0,'tile':0,'scalar':0,'begin':0,'sdf':0}
     expected_sdf=expression('self._accumulate_own_sdf(state_in,dt,color)')
     expected_begin=expression('self._energy_contacts.begin(dt,self._energy_dhat,self._energy_friction,self._energy_eps_v)')
     expected_material_args=expression('self._energy_materials.arguments()')
@@ -87,9 +85,6 @@ def reverse_energy_edits(tree):
             call=node.value
             if isinstance(call,ast.Call):
                 name=ast.unparse(call.func)
-                if name=='self._energy_contacts.resolve':
-                    if dump(call)!=dump(expected_replay):raise AssertionError('Changed exact-energy replay')
-                    counts['replay']+=1;return None
                 if name=='self._accumulate_own_sdf':
                     if dump(call)!=dump(expected_sdf):raise AssertionError('Changed SDF energy call')
                     counts['sdf']+=1;return None
@@ -118,7 +113,7 @@ def reverse_energy_edits(tree):
                             else:counts['tile']+=1
             return self.generic_visit(node)
     restored=Reverse().visit(copy.deepcopy(tree))
-    if counts!={'contact':1,'tile':1,'scalar':1,'begin':1,'replay':1,'sdf':2}:
+    if counts!={'contact':1,'tile':1,'scalar':1,'begin':1,'sdf':2}:
         raise AssertionError('Changed energy-only site counts: '+repr(counts))
     if dump(restored)!=dump(native_iteration_ast()):
         raise AssertionError('Non-energy particle iteration AST changed')
@@ -159,8 +154,18 @@ def model_fixture(*,mu=0.,lam=0.,origin=0.,velocity=0.,pin=0.):
 def own_terms(q:wp.array[wp.vec3],triangles:wp.array2d[int],inverse:wp.mat22,area:float,
               mu:float,lam:float,targets:wp.array[wp.vec3],kpin:float,
               triangle:wp.array[energy.Pack],pin_f:wp.array[wp.vec3],pin_h:wp.array[wp.mat33]):
-    triangle[0]=energy.triangle(q[triangles[0,0]],q[triangles[0,1]],q[triangles[0,2]],inverse,area,mu,lam,0)
-    f,h=dat_materials.evaluate_own_pin_force_hessian(0,q,targets,kpin)
+    value=energy.triangle(q[triangles[0,0]],q[triangles[0,1]],q[triangles[0,2]],inverse,area,mu,lam,0)
+    # The force remains the gradient of our corotated energy. The local solve
+    # uses the native PSD Hessian as a quasi-Newton approximation to that energy.
+    native_h=wp.mat33(0.0)
+    if mu!=0.0 or lam!=0.0:
+        native_f,native_h=stock.evaluate_neo_hookean_membrane_force_hessian(
+            0,0,q,q,triangles,inverse,area,mu,lam,0.0,.1)
+    for row in range(3):
+        for column in range(3):
+            value[3+3*row+column]=native_h[row,column]
+    triangle[0]=value
+    f,h=energies.evaluate_own_pin_force_hessian(0,q,targets,kpin)
     pin_f[0]=f;pin_h[0]=h
 
 
@@ -178,7 +183,7 @@ class StrictDatStructureTests(unittest.TestCase):
     def test_reverse_exact_compiled_ast_preserves_all_nonenergy_code(self):
         tree,counts=compiled_candidate_ast()
         self.assertEqual(counts,{'contact':1,'tile':1,'scalar':1})
-        self.assertEqual(reverse_energy_edits(tree),{'contact':1,'tile':1,'scalar':1,'begin':1,'replay':1,'sdf':2})
+        self.assertEqual(reverse_energy_edits(tree),{'contact':1,'tile':1,'scalar':1,'begin':1,'sdf':2})
         self.assertIsNot(SolverDAT._solve_particle_iteration,Native._solve_particle_iteration)
         self.assertIs(Native._solve_particle_iteration,REFERENCE_ITERATION)
         # Negative control: a changed launch policy must fail even though every
@@ -187,7 +192,7 @@ class StrictDatStructureTests(unittest.TestCase):
         key=next(n for n in ast.walk(damaged) if isinstance(n,ast.keyword) and n.arg=='max_blocks')
         key.value=ast.Constant(value=1)
         with self.assertRaisesRegex(AssertionError,'Non-energy'):reverse_energy_edits(damaged)
-        self.assertTrue(all(x['unchanged_non_energy_ast'] for x in material_kernels.assert_stock_layout().values()))
+        self.assertTrue(all(x['unchanged_non_energy_ast'] for x in energies.assert_stock_layout().values()))
 
     def test_lifecycle_and_reference_kernels_unchanged_after_construction(self):
         model=model_fixture(mu=3,lam=5,pin=80)
@@ -258,7 +263,7 @@ class StrictDatStructureTests(unittest.TestCase):
         np.testing.assert_allclose(out.particle_q.numpy(),expected,rtol=2e-6,atol=2e-8)
         self.assertEqual(before,fingerprint(model))
 
-    def test_triangle_and_pin_full_step_matches_own_force_hessian_local_system(self):
+    def test_triangle_and_pin_full_step_matches_own_force_native_hessian_local_system(self):
         model=model_fixture(mu=9.,lam=13.,pin=40.)
         solver=SolverDAT(model,iterations=1,allow_cpu=True,particle_enable_self_contact=False,enable_fast_math=False)
         state,out=model.state(),model.state()

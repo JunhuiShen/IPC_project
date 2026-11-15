@@ -3,7 +3,7 @@ import pathlib,sys,unittest,os
 import numpy as np
 import warp as wp
 import newton
-from gpu.dat_stock_scene import attach_stock_ipc,model_array_snapshot,rest_edge_coefficients
+from gpu.dat_twist import attach_stock_ipc, model_array_snapshot, rest_edge_coefficients
 
 
 def model():

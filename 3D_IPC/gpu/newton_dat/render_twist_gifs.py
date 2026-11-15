@@ -174,7 +174,7 @@ def make_base(trajectory):
               fill=TEXT, font=_font(19))
     footer = ("Original Newton energies" if variant == "reference" else
               "Our energies + colored CCD guess" if variant == "gs" else
-              "Our energies + full curvature Hessian")
+              "Our energies + native Hessian approximations")
     draw.text((32, 759), f"{footer}  |  fixed view", fill=TEXT, font=_font(18))
     return image
 

@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from gpu.parallel_levels import ParallelLevels
+from gpu.solver import ParallelLevels
 from gpu.policies import _levels_graph
 
 
@@ -65,8 +65,8 @@ class ParallelLevelTests(unittest.TestCase):
         from copy import deepcopy
         from gpu.scene import create_model
         from gpu.solver import SolverIPC
-        from gpu.parallel_colors import ParallelColors
-        from gpu.contact_original import ContactBackendIPC
+        from gpu.solver import ParallelColors
+        from gpu.contact import ContactBackendIPC
         from gpu.ccd import resolve_cached
         from .test_solver_dat import point_over_triangle
         payload=point_over_triangle(height=.1,velocity=(.1,0,0),iterations=0)

@@ -10,7 +10,7 @@ import newton
 from newton.solvers import SolverVBD
 
 from gpu.newton_dat.verify_import import verify
-from gpu.solver_dat_reference import SolverDATReference
+from gpu import SolverDATReference
 
 
 class DatRuntimeTests(unittest.TestCase):
@@ -23,7 +23,7 @@ class DatRuntimeTests(unittest.TestCase):
     def test_public_solver_imports_select_their_own_runtime(self):
         for module, name, folder in (("gpu.solver", "SolverIPC", "newton"),
                                      ("gpu.solver_dat", "SolverDAT", "newton_reference"),
-                                     ("gpu.solver_dat_reference", "SolverDATReference", "newton_reference")):
+                                     ("gpu", "SolverDATReference", "newton_reference")):
             with self.subTest(solver=name):
                 code = (f"from {module} import {name}; import newton; from pathlib import Path; "
                         f"assert Path(newton.__file__).resolve().parents[1].name == {folder!r}")

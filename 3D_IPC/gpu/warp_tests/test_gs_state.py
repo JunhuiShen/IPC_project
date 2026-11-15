@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from gpu.gs import MovementBoxes
+from gpu.solver import MovementBoxes
 
 
 class MovementBoxTests(unittest.TestCase):

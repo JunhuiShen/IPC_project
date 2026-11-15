@@ -276,7 +276,7 @@ def main(argv=None):
             if options.test:
                 forwarded.append("--test")
             if options.stock_cloth_twist:
-                from .stock_twist import run
+                from .dat_twist import run_own as run
                 return run(forwarded)
             from .dat_twist import run as run_twist
             return run_twist(forwarded)

@@ -1,7 +1,7 @@
 #include "SIMD.h"
 #include "broad_phase.h"
 #include "friction_energy.h"
-#include "general_simd_contact.h"
+#include "general_simd.h"
 #include "make_shape.h"
 #include "mesh_utils.h"
 #include "parallel_helper.h"

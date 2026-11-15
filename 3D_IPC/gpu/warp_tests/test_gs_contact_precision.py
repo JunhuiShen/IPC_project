@@ -6,13 +6,38 @@ import numpy as np
 import warp as wp
 
 from gpu import contact
-from gpu.contact_original import ContactBackendIPC
-from gpu.gs_contact_fast import make_ordinary
+from gpu.contact import ContactBackendIPC
+from gpu.contact import make_gs_ordinary as make_ordinary
 from gpu.query_groups import QueryGroups
 from newton._src.geometry.tri_mesh_collision import build_tri_mesh_collision_info
 
 from .test_movement_box_queries import fixture
-from . import test_dat_contact_precision as dat_checks
+def assert_relative_norm(self, actual, expected, *, rtol=5e-4, atol=1e-10):
+    actual = np.asarray(actual, np.float64)
+    expected = np.asarray(expected, np.float64)
+    self.assertTrue(np.isfinite(actual).all())
+    error = np.linalg.norm(actual - expected)
+    limit = atol + rtol * np.linalg.norm(expected)
+    self.assertLessEqual(error, limit,
+                         f"relative error {error / max(np.linalg.norm(expected), atol):.6g}")
+
+
+def independent_barrier(q, kind, radius, stiffness):
+    """Smooth interior-feature energy from a separate NumPy projection."""
+    if kind == 0:
+        basis = np.column_stack((q[2] - q[1], q[3] - q[1]))
+        uv = np.linalg.lstsq(basis, q[0] - q[1], rcond=None)[0]
+        if not (uv[0] > .05 and uv[1] > .05 and uv.sum() < .95):
+            raise AssertionError("Finite-difference fixture crossed a triangle feature")
+        residual = q[0] - q[1] - basis @ uv
+    else:
+        basis = np.column_stack((q[1] - q[0], -(q[3] - q[2])))
+        uv = np.linalg.lstsq(basis, q[2] - q[0], rcond=None)[0]
+        if not np.all((uv > .05) & (uv < .95)):
+            raise AssertionError("Finite-difference fixture crossed an edge feature")
+        residual = q[0] - q[2] + basis @ uv
+    distance = np.linalg.norm(residual)
+    return -stiffness * (distance - radius) ** 2 * np.log(distance / radius)
 
 
 def make_case(device, kind, points, *, previous=None, friction=0.0, exact=True,
@@ -57,7 +82,7 @@ class GsContactPrecisionTests(unittest.TestCase):
         cls.devices = [wp.get_device("cpu"), *wp.get_cuda_devices()]
 
     def assert_close(self, actual, expected):
-        dat_checks.DatContactPrecisionTests.assert_relative_norm(self, actual, expected)
+        assert_relative_norm(self, actual, expected)
 
     def test_all_roles_feature_families_and_both_friction_regimes_match_binary64(self):
         fixtures = [
@@ -142,7 +167,7 @@ class GsContactPrecisionTests(unittest.TestCase):
                 force, hessian = scatter(case)
                 self.assertEqual(int(case[1]._grouped_fast.ordinary_count.numpy()[0]), 0)
                 q = case[0].particle_q.numpy().astype(np.float64)
-                energy = lambda x: dat_checks.DatContactPrecisionTests.independent_barrier(x, kind, .1, 100.0)
+                energy = lambda x: independent_barrier(x, kind, .1, 100.0)
                 base, step = energy(q), 2e-5
                 expected_f, expected_h = np.zeros((4, 3)), np.zeros((4, 3, 3))
                 for role in range(4):

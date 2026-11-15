@@ -15,13 +15,15 @@ explicit outside-frame ``reset_status``.
 
 from __future__ import annotations
 
+from functools import cache
 import math
+from pathlib import Path
 
 import warp as wp
 
 from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
 
-from .warp_build import configure_module as _configure
+from .warp_build import configure_module as _configure, flatten_headers as _flatten_headers
 from .movement_box_queries import build_nodes as _build_box_nodes
 
 
@@ -577,10 +579,8 @@ class ContactBackend:
         self.rigid_coordinate_margin = wp.zeros(1, float, device=self.device)
         # Keep the large exact fallback out of every fast/detection module
         # block-size variant. The cold module has one block-size-one kernel.
-        from .contact_exact import resolve
-        self._resolve = resolve
-        from .contact_grouped_exact import resolve as resolve_grouped
-        self._resolve_grouped = resolve_grouped
+        self._resolve = resolve_exact
+        self._resolve_grouped = resolve_exact_grouped
         parameters(dt=1.0, **self.options)
 
     def refresh(self, info=None):
@@ -820,11 +820,459 @@ class ContactBackend:
             raise RuntimeError("IPC collision backend: " + names.get(code, str(code)))
 
 
-def __getattr__(name):
-    if name == "evaluate_self_exact":
-        from .contact_exact import evaluate_self_exact
-        return evaluate_self_exact
-    raise AttributeError(name)
+# Cold exact kernels remain isolated from fast/detection block-size variants.
+@wp.func_native(_INPUT + _EXACT + _PACK)
+def evaluate_self_exact(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3], nodes: wp.vec4i,
+                        kind: int, params: Parameters, words: wp.array[wp.uint32], slots: wp.array[int],
+                        worker: int) -> Result: ...
 
 
-configure_module()
+@wp.kernel(module="unique", enable_backward=False)
+def resolve_exact(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+             triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
+             ids: wp.array[int], colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
+             color: int, params: Parameters, words: wp.array[wp.uint32], slots: wp.array[int],
+             workers: int, pending: wp.array[int], pending_count: wp.array[int],
+             forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], error: wp.array[int]):
+    worker = wp.tid()
+    if error[0] == 0:
+        for index in range(worker, pending_count[0], workers):
+            nodes, kind = decode_candidate(ids[pending[index]], triangles, edges, info)
+            result = evaluate_self_exact(positions, previous, nodes, kind, params, words, slots, worker)
+            status = int(result[48])
+            if status != 0:
+                wp.atomic_max(error, 0, 100 + status)
+            elif result[49] != 0.0:
+                scatter_self(result, nodes, colors, flags, mass, color, forces, hessians)
+
+
+configure_module(resolve_exact, include_filter=False)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def resolve_exact_grouped(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+             triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
+             ids: wp.array[int], colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
+             current_color: wp.array[int], params: Parameters, words: wp.array[wp.uint32], slots: wp.array[int],
+             workers: int, pending: wp.array[int], pending_count: wp.array[int],
+             forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], error: wp.array[int]):
+    worker = wp.tid()
+    if error[0] == 0:
+        color = current_color[0]
+        for index in range(worker, pending_count[0], workers):
+            nodes, kind = decode_candidate(ids[pending[index]], triangles, edges, info)
+            result = evaluate_self_exact(positions, previous, nodes, kind, params, words, slots, worker)
+            status = int(result[48])
+            if status != 0:
+                wp.atomic_max(error, 0, 100 + status)
+            elif result[49] != 0.0:
+                scatter_self(result, nodes, colors, flags, mass, color, forces, hessians)
+
+
+configure_module(resolve_exact_grouped, include_filter=False)
+
+
+
+# Float32-first GS contact energy and its ordinary replay.
+def configure_fast_module(module=None):
+    """Compile only compact contact arithmetic for float32-first kernels."""
+    path = Path(__file__).resolve().with_name("contact.cuh")
+    source = path.read_text()
+    marker = "// BEGIN COMPACT CONTACT ARITHMETIC"
+    if source.count(marker) != 1:
+        raise RuntimeError("Compact contact arithmetic section changed")
+    compact = source.split(marker, 1)[1]
+    flattened, dependencies = _flatten_headers(("contact.cuh",), source_overrides={path: compact})
+    prefix, _ = _flatten_headers(())
+    if not flattened.startswith(prefix):
+        raise RuntimeError("Unexpected compact contact arithmetic preamble")
+    preamble = flattened[len(prefix):].replace(
+        "IPC_WARP_HEADER_CONTACT_CUH", "IPC_WARP_HEADER_DAT_CONTACT_FAST_CUH")
+    return _configure(__name__ if module is None else module, (),
+                      extra_preamble=preamble, extra_dependencies=dependencies)
+
+
+@wp.func_native(r"""
+    wp::vec_t<50,float> packed;
+    for(int k=0;k<50;++k)packed[k]=0.0f;
+    using namespace ipc_gpu::dat_contact_fast;
+    Input in;
+    for(int i=0;i<4;++i) {
+        if(nodes[i]<0||nodes[i]>=positions.shape[0]||nodes[i]>=previous.shape[0]) {
+            packed[48]=1.0f;return packed;
+        }
+        for(int k=0;k<3;++k) {
+            in.x[i][k]=positions.data[nodes[i]][k];
+            in.previous[i][k]=previous.data[nodes[i]][k];
+        }
+    }
+    // Match the established zero-barrier/no-radius fast no-force packet.
+    if(params.d_hat<=0.0||params.k_barrier<=0.0)return packed;
+    for(int i=0;i<4;++i)for(int k=0;k<3;++k) {
+        if(!finite(in.x[i][k])||!finite(in.previous[i][k])) {
+            packed[48]=1.0f;return packed;
+        }
+    }
+    in.kind=kind;
+    in.d_hat=static_cast<float>(params.d_hat);in.stiffness=static_cast<float>(params.k_barrier);
+    in.dt=static_cast<float>(params.dt);in.friction=static_cast<float>(params.friction);in.eps_v=static_cast<float>(params.eps_v);
+    // A cast or validation ambiguity belongs to the original evaluator.
+    if((kind!=0&&kind!=1)||!finite(in.d_hat)||!finite(in.stiffness)||!finite(in.dt)
+       ||!finite(in.friction)||!finite(in.eps_v)||!(in.d_hat>0.0f)||!(in.stiffness>0.0f)
+       ||!(in.dt>0.0f)||in.friction<0.0f||(in.friction==0.0f&&params.friction!=0.0)
+       ||!(in.eps_v>0.0f)||params.eps!=1.0e-12
+       ||in.d_hat<FLT_MIN||in.stiffness<FLT_MIN||in.dt<FLT_MIN||in.eps_v<FLT_MIN
+       ||(in.friction>0.0f&&in.friction<FLT_MIN)) {
+        packed[48]=6.0f;return packed;
+    }
+    const int status=evaluate(in,&packed[0]);
+    if(status) {for(int k=0;k<48;++k)packed[k]=0.0f;packed[48]=static_cast<float>(status);packed[49]=0.0f;}
+    return packed;
+""")
+def evaluate_self_fast(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3], nodes: wp.vec4i,
+                  kind: int, params: Parameters) -> Result: ...
+
+
+@wp.func
+def _scatter_gs_role(packet: Result, nodes: wp.vec4i, colors: wp.array[int],
+                   flags: wp.array[int], mass: wp.array[float], color: int, role: int,
+                   forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33]):
+    vertex = nodes[role]
+    if colors[vertex] == color and flags[vertex] & 1 != 0 and mass[vertex] > 0.0:
+        force = wp.vec3(packet[12 * role], packet[12 * role + 1], packet[12 * role + 2])
+        hessian = wp.mat33(packet[12 * role + 3], packet[12 * role + 4], packet[12 * role + 5],
+            packet[12 * role + 6], packet[12 * role + 7], packet[12 * role + 8],
+            packet[12 * role + 9], packet[12 * role + 10], packet[12 * role + 11])
+        wp.atomic_add(forces, vertex, force)
+        wp.atomic_add(hessians, vertex, hessian)
+
+
+@wp.func
+def _scatter_gs(packet: Result, nodes: wp.vec4i, colors: wp.array[int],
+              flags: wp.array[int], mass: wp.array[float], color: int,
+              forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33]):
+    # Literal role arguments avoid dynamically indexed packet copies, as in
+    # DAT's compact result extraction. Warp 1.19 cannot static-unroll range.
+    _scatter_gs_role(packet, nodes, colors, flags, mass, color, 0, forces, hessians)
+    _scatter_gs_role(packet, nodes, colors, flags, mass, color, 1, forces, hessians)
+    _scatter_gs_role(packet, nodes, colors, flags, mass, color, 2, forces, hessians)
+    _scatter_gs_role(packet, nodes, colors, flags, mass, color, 3, forces, hessians)
+
+
+@cache
+def make_gs_fast():
+    @wp.kernel(module="unique", enable_backward=False)
+    def evaluate(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+                  triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
+                  ids: wp.array[int], count: wp.array[int], colors: wp.array[int], flags: wp.array[int],
+                  mass: wp.array[float], current_color: wp.array[int], offsets: wp.array[int], use_view: int,
+                  view_epoch: wp.array[wp.uint64], query_epoch: wp.array[wp.uint64],
+                  params: Parameters, workers: int, ordinary_pending: wp.array[int],
+                  ordinary_count: wp.array[int], forces: wp.array[wp.vec3],
+                  hessians: wp.array[wp.mat33], error: wp.array[int]):
+        worker = wp.tid()
+        color = current_color[0]
+        valid = color >= 0 and color < colors.shape[0]
+        begin = int(0)
+        end = count[0]
+        if use_view != 0 and valid:
+            valid = view_epoch[0] == query_epoch[0]
+            begin = offsets[color]
+            end = offsets[color + 1]
+        valid = valid and begin >= 0 and end >= begin and end <= ids.shape[0]
+        if not valid:
+            wp.atomic_max(error, 0, 11)
+        if error[0] == 0 and valid:
+            for at in range(begin + worker, end, workers):
+                nodes, kind = decode_candidate(ids[at], triangles, edges, info)
+                touches = False
+                for role in range(4):
+                    node = nodes[role]
+                    if colors[node] == color and flags[node] & 1 != 0 and mass[node] > 0.0:
+                        touches = True
+                if touches:
+                    packet = evaluate_self_fast(positions, previous, nodes, kind, params)
+                    status = int(packet[48])
+                    if status == 6:
+                        slot = wp.atomic_add(ordinary_count, 0, 1)
+                        if slot < ordinary_pending.shape[0]:
+                            ordinary_pending[slot] = at
+                        else:
+                            wp.atomic_max(error, 0, 12)
+                    elif status != 0:
+                        wp.atomic_max(error, 0, 100 + status)
+                    elif packet[49] != 0.0:
+                        _scatter_gs(packet, nodes, colors, flags, mass, color, forces, hessians)
+
+    configure_fast_module(evaluate)
+    return evaluate
+
+
+@cache
+def make_gs_ordinary(distribute_blocks=False):
+    """Keep sparse queues spread across 64-thread CUDA blocks.
+
+    The distributed variant requires a 64-thread block and a worker count
+    divisible by 64. This permutation changes ownership only; grid-stride
+    iteration, per-pair arithmetic and exact replay routing stay identical.
+    """
+    @wp.kernel(module="unique", enable_backward=False)
+    def resolve(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+                 triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
+                 ids: wp.array[int], colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
+                 current_color: wp.array[int], params: Parameters, workers: int,
+                 ordinary_pending: wp.array[int], ordinary_count: wp.array[int],
+                 exact_pending: wp.array[int], exact_count: wp.array[int],
+                 forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], error: wp.array[int]):
+        worker = wp.tid()
+        if wp.static(distribute_blocks):
+            worker = (wp.tid() % 64) * (workers // 64) + wp.tid() // 64
+        if error[0] == 0:
+            color = current_color[0]
+            for index in range(worker, wp.min(ordinary_count[0], ordinary_pending.shape[0]), workers):
+                at = ordinary_pending[index]
+                if at < 0 or at >= ids.shape[0]:
+                    wp.atomic_max(error, 0, 11)
+                else:
+                    nodes, kind = decode_candidate(ids[at], triangles, edges, info)
+                    packet = evaluate_self(positions, previous, nodes, kind, params)
+                    status = int(packet[48])
+                    if status == 2 and params.exact_geometry != 0:
+                        slot = wp.atomic_add(exact_count, 0, 1)
+                        if slot < exact_pending.shape[0]:
+                            exact_pending[slot] = at
+                        else:
+                            wp.atomic_max(error, 0, 12)
+                    elif status != 0:
+                        wp.atomic_max(error, 0, 100 + status)
+                    elif packet[49] != 0.0:
+                        _scatter_gs(packet, nodes, colors, flags, mass, color, forces, hessians)
+
+    configure_module(resolve)
+    return resolve
+
+
+class GsContactFast:
+    """Persistent float32 → ordinary → exact replay queues for grouped GS."""
+
+    def __init__(self, contacts):
+        self.contacts = contacts
+        self.device = contacts.device
+        self.ordinary_pending = wp.empty(contacts.capacity, int, device=self.device)
+        self.ordinary_count = wp.zeros(1, int, device=self.device)
+        self.ordinary_workers = max(1, self.device.sm_count * 64) if self.device.is_cuda else 1
+        self.ordinary_block_dim = 64 if self.device.is_cuda else 128
+        self._fast = make_gs_fast()
+        self._ordinary = make_gs_ordinary(distribute_blocks=self.device.is_cuda)
+
+    def accumulate_grouped(self, positions, previous, color, forces, hessians, dt, *,
+                           colors, current_color, query_view=None):
+        c, model = self.contacts, self.contacts.model
+        n = model.particle_count
+        if colors is None or colors.dtype != wp.int32 or colors.shape != (n,) or colors.device != self.device:
+            raise TypeError("Dynamic contact colors must match the model device int array")
+        if (current_color is None or current_color.dtype != wp.int32 or current_color.shape != (1,)
+                or current_color.device != self.device):
+            raise TypeError("Dynamic contact selection requires one device int")
+        if not c.track_query_epoch:
+            raise ValueError("Dynamic GS contact assembly requires tracked query epochs")
+        ids, offsets, epoch = c.candidate_ids, c.candidate_count, c.query_epoch
+        selected_colors = colors
+        if query_view is not None:
+            query_view.validate(c)
+            if query_view.current_group is not current_color:
+                raise ValueError("Contact query span and current_color must share their device selector")
+            ids, offsets, epoch = query_view.ids, query_view.offsets, query_view.epoch
+            selected_colors = query_view.node_groups
+        params = parameters(dt=float(dt), **c.options)
+        self.ordinary_count.zero_()
+        c.pending_count.zero_()
+        if c.capacity:
+            wp.launch(self._fast, c.fast_workers,
+                [positions, previous, model.tri_indices, model.edge_indices, c.info,
+                 ids, c.candidate_count, selected_colors, model.particle_flags, model.particle_mass,
+                 current_color, offsets, int(query_view is not None), epoch, c.query_epoch,
+                 params, c.fast_workers, self.ordinary_pending, self.ordinary_count,
+                 forces, hessians, c.error], device=self.device, block_dim=128)
+            wp.launch(self._ordinary, self.ordinary_workers,
+                [positions, previous, model.tri_indices, model.edge_indices, c.info,
+                 ids, selected_colors, model.particle_flags, model.particle_mass, current_color,
+                 params, self.ordinary_workers, self.ordinary_pending, self.ordinary_count,
+                 c.pending, c.pending_count, forces, hessians, c.error], device=self.device, block_dim=self.ordinary_block_dim)
+            wp.launch(c._resolve_grouped, c.workers,
+                [positions, previous, model.tri_indices, model.edge_indices, c.info,
+                 ids, selected_colors, model.particle_flags, model.particle_mass,
+                 current_color, params, c.words, c.slots, c.workers, c.pending,
+                 c.pending_count, forces, hessians, c.error], device=self.device, block_dim=1)
+
+
+
+# Specialized original zero-friction GS assembly.
+ORIGINAL_HEADERS=("contact_original.cuh","separation.cuh")
+
+# Match evaluate_self's exact preflight and existing certificate. Invalid or
+# uncertified inputs always reach the full evaluator and retain its error.
+# Represented geometry is promoted to binary64 exactly as in the shared wrapper.
+@wp.func_native(r"""
+    for(int i=0;i<4;++i)
+        if(nodes[i]<0||nodes[i]>=positions.shape[0]||nodes[i]>=previous.shape[0])return 1;
+    if(!(params.d_hat>0&&params.k_barrier>0))return 0;
+    bool filterable=ipc_gpu::separation::finite(params.k_barrier)
+        &&ipc_gpu::separation::finite(params.dt)&&params.dt>0
+        &&ipc_gpu::separation::finite(params.friction)&&params.friction>=0
+        &&ipc_gpu::separation::finite(params.eps_v)&&params.eps_v>0
+        &&ipc_gpu::separation::finite(params.eps)&&params.eps>0;
+    double points[4][3];
+    for(int i=0;i<4;++i)for(int k=0;k<3;++k){
+        points[i][k]=double(positions.data[nodes[i]][k]);
+        filterable=filterable&&ipc_gpu::separation::finite(double(previous.data[nodes[i]][k]));
+    }
+    return !filterable||!ipc_gpu::separation::safe(points,points,kind==0,params.d_hat);
+""")
+def needs_original_evaluation(positions:wp.array[wp.vec3],previous:wp.array[wp.vec3],nodes:wp.vec4i,
+                              kind:int,params:Parameters)->int: ...
+
+
+@wp.func_native(_INPUT+r"""
+    if(params.exact_geometry!=0||params.friction!=0.0){
+        wp::vec_t<50,float> invalid;for(int k=0;k<50;++k)invalid[k]=0;invalid[48]=1;return invalid;
+    }
+    original_contact_storage::OriginalSelfZeroOutput out;
+    if(params.d_hat>0&&params.k_barrier>0){
+        bool filterable=ipc_gpu::separation::finite(in.k_barrier)
+            &&ipc_gpu::separation::finite(in.dt)&&in.dt>0
+            &&ipc_gpu::separation::finite(in.friction)&&in.friction>=0
+            &&ipc_gpu::separation::finite(in.eps_v)&&in.eps_v>0
+            &&ipc_gpu::separation::finite(in.eps)&&in.eps>0;
+        for(int i=0;i<4;++i)for(int k=0;k<3;++k)
+            filterable=filterable&&ipc_gpu::separation::finite(in.previous[i][k]);
+        if(!filterable||!ipc_gpu::separation::safe(in.positions,in.positions,kind==0,params.d_hat))
+            out=evaluate_contact_original_self_zero(in);
+    }
+    wp::vec_t<50,float> packed;for(int k=0;k<50;++k)packed[k]=0;
+    packed[48]=static_cast<float>(static_cast<int>(out.status));packed[49]=static_cast<float>(out.active);
+    if(out.status==ContactStatus::Ok&&out.active){
+        const double inverse_dt2=1.0/(params.dt*params.dt);
+        for(int role=0;role<4;++role){
+            const double weight=out.weights[role];
+            for(int k=0;k<3;++k){
+                // Retain these original zero-friction operations, including
+                // signed zero and inverse-dt overflow behavior.
+                const double g=params.k_barrier*out.barrier_gradient[role][k]+(weight*0.0)*inverse_dt2;
+                packed[12*role+k]=static_cast<float>(-g);
+                for(int l=0;l<3;++l){
+                    const double h=params.k_barrier*out.self_hessian[role][3*k+l]
+                        +((weight*0.0)*weight)*inverse_dt2;
+                    packed[12*role+3+3*k+l]=static_cast<float>(h);
+                }
+            }
+        }
+        for(int k=0;k<48;++k)if(!isfinite(packed[k])){packed[48]=4;packed[49]=0;break;}
+    }
+    return packed;
+""")
+def evaluate_original(positions:wp.array[wp.vec3],previous:wp.array[wp.vec3],nodes:wp.vec4i,
+                      kind:int,params:Parameters)->Result: ...
+
+
+@cache
+def make_filter_kernel():
+    @wp.kernel(module="unique",enable_backward=False)
+    def filter_kernel(positions:wp.array[wp.vec3],previous:wp.array[wp.vec3],
+        triangles:wp.array2d[int],edges:wp.array2d[int],info:TriMeshCollisionInfo,
+        ids:wp.array[int],count:wp.array[int],colors:wp.array[int],flags:wp.array[int],mass:wp.array[float],
+        color:int,params:Parameters,workers:int,pending:wp.array[int],pending_count:wp.array[int],error:wp.array[int]):
+        if error[0]==0:
+            for at in range(wp.tid(),count[0],workers):
+                nodes,kind=decode_candidate(ids[at],triangles,edges,info)
+                touches=False
+                for role in range(4):
+                    node=nodes[role]
+                    if colors[node]==color and flags[node]&1!=0 and mass[node]>0.0:touches=True
+                if touches and needs_original_evaluation(positions,previous,nodes,kind,params)!=0:
+                    slot=wp.atomic_add(pending_count,0,1)
+                    if slot<pending.shape[0]:pending[slot]=ids[at]
+                    else:wp.atomic_max(error,0,12)
+    _configure(filter_kernel,("separation.cuh",))
+    return filter_kernel
+
+
+@cache
+def make_original_kernel():
+    @wp.kernel(module="unique",enable_backward=False)
+    def original_kernel(positions:wp.array[wp.vec3],previous:wp.array[wp.vec3],
+        triangles:wp.array2d[int],edges:wp.array2d[int],info:TriMeshCollisionInfo,
+        ids:wp.array[int],count:wp.array[int],colors:wp.array[int],flags:wp.array[int],mass:wp.array[float],
+        color:int,params:Parameters,workers:int,forces:wp.array[wp.vec3],hessians:wp.array[wp.mat33],error:wp.array[int]):
+        if error[0]==0:
+            for at in range(wp.tid(),count[0],workers):
+                nodes,kind=decode_candidate(ids[at],triangles,edges,info)
+                touches=False
+                for role in range(4):
+                    node=nodes[role]
+                    if colors[node]==color and flags[node]&1!=0 and mass[node]>0.0:touches=True
+                if touches:
+                    result=evaluate_original(positions,previous,nodes,kind,params)
+                    if int(result[48])!=0:wp.atomic_max(error,0,100+int(result[48]))
+                    elif result[49]!=0.0:scatter_self(result,nodes,colors,flags,mass,color,forces,hessians)
+    _configure(original_kernel,ORIGINAL_HEADERS)
+    return original_kernel
+
+
+class ContactBackendIPC(ContactBackend):
+    """Our GS backend; DAT and shared ContactBackend retain their defaults."""
+    def __init__(self,*args,grouped_precision="float64",**kwargs):
+        if grouped_precision not in ("float32","float64"):
+            raise ValueError("Grouped GS contact precision must be float32 or float64")
+        super().__init__(*args,**kwargs)
+        self.grouped_precision=grouped_precision
+        self._grouped_fast=None
+        if grouped_precision=="float32":
+            self._grouped_fast=GsContactFast(self)
+        self._original_zero_friction=(not self.options['exact_geometry'] and self.options['friction']==0.0)
+        if self._original_zero_friction:
+            # These private launch settings were measured on frozen real GS
+            # inputs. Shared fast_workers and cold exact arenas stay intact.
+            self._original_block_dim=64
+            self._original_workers=max(128,self.device.sm_count*256) if self.device.is_cuda else self.fast_workers
+            self._filter_original=make_filter_kernel()
+            self._evaluate_original=make_original_kernel()
+
+    def accumulate_grouped(self,positions,previous,color,forces,hessians,dt,*,colors,current_color,query_view=None):
+        if self._grouped_fast is not None:
+            return self._grouped_fast.accumulate_grouped(positions,previous,color,forces,hessians,dt,
+                colors=colors,current_color=current_color,query_view=query_view)
+        return super().accumulate_grouped(positions,previous,color,forces,hessians,dt,
+            colors=colors,current_color=current_color,query_view=query_view)
+
+    def accumulate(self,positions,previous,color,forces,hessians,dt,*,colors=None,current_color=None,query_view=None):
+        if current_color is not None or colors is not None or query_view is not None:
+            return super().accumulate(positions,previous,color,forces,hessians,dt,
+                colors=colors,current_color=current_color,query_view=query_view)
+        if not self._original_zero_friction or self.options['exact_geometry'] or self.options['friction']!=0.0:
+            return super().accumulate(positions,previous,color,forces,hessians,dt)
+        p=parameters(dt=float(dt),**self.options)
+        self.pending_count.zero_()
+        if self.capacity:
+            wp.launch(self._filter_original,self._original_workers,
+                [positions,previous,self.model.tri_indices,self.model.edge_indices,self.info,
+                 self.candidate_ids,self.candidate_count,self.model.particle_colors,self.model.particle_flags,
+                 self.model.particle_mass,int(color),p,self._original_workers,self.pending,self.pending_count,self.error],device=self.device,block_dim=self._original_block_dim)
+            # In original mode NeedsExact fails closed; this queue holds encoded
+            # uncertain pair IDs, never exact requests. Every color rebuilds it.
+            wp.launch(self._evaluate_original,self._original_workers,
+                [positions,previous,self.model.tri_indices,self.model.edge_indices,self.info,
+                 self.pending,self.pending_count,self.model.particle_colors,self.model.particle_flags,
+                 self.model.particle_mass,int(color),p,self._original_workers,forces,hessians,self.error],device=self.device,block_dim=self._original_block_dim)
+
+
+def configure_original_module(module=None, headers=None):
+    """Configure the original zero-friction storage/certificate entry points."""
+    return _configure(__name__ if module is None else module,
+                      ORIGINAL_HEADERS if headers is None else headers)
+
+
+# The shared default module can host ordinary, exact, compact and
+# original diagnostic callbacks. Hot/cold unique kernels above keep
+# their original narrow preambles and launch policies.
+_configure(__name__, (*HEADERS, *ORIGINAL_HEADERS))

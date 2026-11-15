@@ -184,7 +184,7 @@ class ContactTests(CollisionFixture):
             self.assertEqual(int(backend.candidate_count.numpy()[0]), 1)
 
     def test_large_coordinate_rigid_rounding_couples_cross_axis_arcs(self):
-        from gpu import body_graph
+        from gpu import rigid
         angle = .1
         reference = np.asarray([[0, -512, -1], [0, 512, -1],
                                 [0, 512, 1], [0, -512, 1]], dtype=np.float32)
@@ -236,10 +236,10 @@ class ContactTests(CollisionFixture):
             colors = wp.zeros(2, int, device=device)
             marks = wp.zeros(2, int, device=device)
             color_count = wp.zeros(1, int, device=device)
-            wp.launch(body_graph.count_incidence, backend.capacity,
+            wp.launch(rigid.count_incidence, backend.capacity,
                 [backend.candidate_ids, backend.candidate_count, model.tri_indices, model.edge_indices,
                  info, owners, counts, conflicts, backend.error], device=device)
-            wp.launch(body_graph.color_bodies, 1,
+            wp.launch(rigid.color_bodies, 1,
                 [conflicts, colors, marks, color_count, backend.error], device=device)
             backend.check()
             self.assertNotEqual(*colors.numpy())

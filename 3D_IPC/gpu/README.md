@@ -37,9 +37,9 @@ Newton cloth example uses its own frame loop. Then follow one of these paths:
 
 | Solver | Start here | Follow into |
 |---|---|---|
-| Reference DAT | [solver_dat_reference.py](solver_dat_reference.py), a direct alias to upstream `SolverVBD` | [solver_vbd.py](third_party/newton_reference/newton/_src/solvers/vbd/solver_vbd.py) for the timestep and color loop; [particle_vbd_kernels.py](third_party/newton_reference/newton/_src/solvers/vbd/particle_vbd_kernels.py) for local solves and DAT truncation |
-| DAT with our energies | [solver_dat.py](solver_dat.py), which substitutes energy calls in the upstream particle loop | [dat_material_kernels.py](dat_material_kernels.py) and [dat_materials.py](dat_materials.py) for material terms; [dat_contacts.py](dat_contacts.py) for IPC/friction on Newton's contact rows |
-| Our GS solver | [solver.py](solver.py), which supplies our particle update and acceptance hooks | [kernels.py](kernels.py) for local assembly/solves; [ccd.py](ccd.py) for motion checks; [policies.py](policies.py) for CCD initial guesses; [body_solver.py](body_solver.py) for rigid GS |
+| Reference DAT | [`SolverDATReference`](__init__.py), a lazy direct alias to upstream `SolverVBD` | [solver_vbd.py](third_party/newton_reference/newton/_src/solvers/vbd/solver_vbd.py) for the timestep and color loop; [particle_vbd_kernels.py](third_party/newton_reference/newton/_src/solvers/vbd/particle_vbd_kernels.py) for local solves and DAT truncation |
+| DAT with our energies | [solver_dat.py](solver_dat.py), which substitutes energy calls in the upstream particle loop | [dat_energies.py](dat_energies.py) for materials, local energy assembly and IPC/friction on Newton's contact rows |
+| Our GS solver | [solver.py](solver.py), which supplies our particle update and acceptance hooks | [solver.py](solver.py) for local assembly, schedules and GS stages; [ccd.py](ccd.py) for motion checks; [policies.py](policies.py) for CCD initial guesses; [rigid.py](rigid.py) for rigid GS |
 
 For our scene examples, data flows through:
 
@@ -62,12 +62,12 @@ Supporting code is grouped by purpose:
 | Purpose | Files |
 |---|---|
 | Material equations | [energy.py](energy.py) wraps the cloth, solid and bending equations in [cloth_math.cuh](cloth_math.cuh) and [solid_math.cuh](solid_math.cuh) |
-| Mesh contact | [contact.py](contact.py) provides our IPC/friction evaluation; [dat_contact_fast.py](dat_contact_fast.py) provides DAT's mixed-precision evaluator |
+| Mesh contact | [dat_energies.py](dat_energies.py) contains native DAT contacts; [contact.py](contact.py) contains the ordinary, compact and exact GS contact paths. |
 | Analytic obstacles | [sdf.py](sdf.py) assembles signed-distance-field (SDF) terms |
 | CUDA compilation | [warp_build.py](warp_build.py) includes our `.cuh` arithmetic in Warp's compiled kernels |
 | Prescribed motion | [motion.py](motion.py) updates scene targets on the GPU |
-| Rigid bodies | [body_solver.py](body_solver.py) schedules rigid GS; [rigid.py](rigid.py) supplies rigid equations |
-| Shared DAT example | [dat_twist.py](dat_twist.py) runs the Newton example; [stock_twist.py](stock_twist.py) selects our energies; [dat_stock_scene.py](dat_stock_scene.py) attaches their inputs |
+| Rigid bodies | [rigid.py](rigid.py) contains rigid equations, graph preprocessing and GS stages; [rigid.cuh](rigid.cuh) holds their native arithmetic |
+| Shared DAT example | [dat_twist.py](dat_twist.py) runs the Newton example; `run_own()` selects our energies and `attach_stock_ipc()` attaches their inputs in the same module |
 | Tests | [warp_tests/](warp_tests/) covers GS and shared equations; [dat_tests/](dat_tests/) covers the DAT integration |
 
 ## Build

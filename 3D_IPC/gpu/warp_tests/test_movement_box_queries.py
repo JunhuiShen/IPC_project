@@ -8,7 +8,7 @@ import numpy as np
 import warp as wp
 
 from gpu.contact import ContactBackend
-from gpu.contact_original import ContactBackendIPC
+from gpu.contact import ContactBackendIPC
 from gpu.movement_box_queries import build_nodes
 from gpu.query_groups import QueryGroups
 from newton._src.geometry.tri_mesh_collision import build_tri_mesh_collision_info

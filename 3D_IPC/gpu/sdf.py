@@ -1,11 +1,13 @@
 """Our SDF union/penalty/friction law on Newton float32 particle/pose data."""
 
+from functools import cache
 import math
+from pathlib import Path
 
 import numpy as np
 import warp as wp
 
-from .warp_build import configure_module as _configure
+from .warp_build import configure_module as _configure, flatten_headers as _flatten_headers
 
 
 HEADERS=("sdf.cuh",)
@@ -201,6 +203,198 @@ def accumulate_dynamic(positions: wp.array[wp.vec3],previous: wp.array[wp.vec3],
             else:wp.atomic_max(error,0,49)
 
 
+# Compact deformable force/Hessian evaluation and ordinary replay.
+def configure_fast_module(module=None):
+    """Compile only the compact arithmetic section, keeping replay separate."""
+    path = Path(__file__).resolve().with_name("sdf.cuh")
+    source = path.read_text()
+    marker = "// BEGIN COMPACT SDF ARITHMETIC"
+    if source.count(marker) != 1:
+        raise RuntimeError("SDF compact arithmetic section changed")
+    compact = source.split(marker, 1)[1]
+    flattened, dependencies = _flatten_headers(HEADERS, source_overrides={path: compact})
+    prefix, _ = _flatten_headers(())
+    if not flattened.startswith(prefix):
+        raise RuntimeError("Unexpected SDF arithmetic preamble")
+    # _configure supplies the SDK-free CRT once. A distinct outer guard lets
+    # compact and ordinary preambles coexist without suppressing either one.
+    preamble = flattened[len(prefix):].replace(
+        "IPC_WARP_HEADER_SDF_CUH", "IPC_WARP_HEADER_SDF_FAST_CUH")
+    return _configure(__name__ if module is None else module, (),
+                      extra_preamble=preamble, extra_dependencies=dependencies)
+
+
+FastResult = wp.types.vector(length=14, dtype=wp.float32)
+
+
+
+
+_FAST_EVALUATE_SOURCE = r"""
+    wp::vec_t<14,float> packet;
+    for(int k=0;k<14;++k)packet[k]=0.0f;
+    packet[13]=-1.0f;
+    ipc_gpu::sdf_fast::Input in;
+    for(int k=0;k<3;++k){in.x[k]=position[k];in.previous[k]=previous[k];}
+    in.stiffness=params.stiffness;in.epsilon=params.epsilon;in.dt=params.dt;
+    in.friction=params.friction;in.eps_v=params.eps_v;in.include_curvature=params.include_curvature;
+    in.prepared_poses=0;
+    const int status=ipc_gpu::sdf_fast::evaluate(in,
+        reinterpret_cast<const double*>(colliders.data),sizeof(colliders.data[0])/sizeof(double),
+        colliders.shape[0],&packet[0]);
+    if(status) {
+        for(int k=0;k<12;++k)packet[k]=0.0f;
+        packet[12]=static_cast<float>(status);
+    }
+    return packet;
+"""
+
+
+@wp.func_native(_FAST_EVALUATE_SOURCE)
+def evaluate_fast(position: wp.vec3, previous: wp.vec3, colliders: wp.array[Collider],
+             params: Parameters) -> FastResult: ...
+
+
+@wp.func_native(_FAST_EVALUATE_SOURCE.replace("in.prepared_poses=0;", "in.prepared_poses=1;"))
+def _evaluate_prepared_fast(position: wp.vec3, previous: wp.vec3, colliders: wp.array[Collider],
+                       params: Parameters) -> FastResult: ...
+
+
+@wp.struct
+class FastContext:
+    pending: wp.array[int]
+    count: wp.array[int]
+    error: wp.array[int]
+    workers: int
+
+
+@wp.func
+def _finite_fast_terms(force: wp.vec3, hessian: wp.mat33):
+    valid = True
+    for a in range(3):
+        valid = valid and wp.isfinite(force[a])
+        for b in range(3):
+            valid = valid and wp.isfinite(hessian[a, b])
+    return valid
+
+
+@wp.func
+def _fast_terms(packet: FastResult):
+    return (wp.vec3(packet[0], packet[1], packet[2]),
+            wp.mat33(packet[3], packet[4], packet[5], packet[6], packet[7], packet[8],
+                     packet[9], packet[10], packet[11]))
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def accumulate_fast(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3], flags: wp.array[int],
+               colors: wp.array[int], color: int, solid: wp.array[int], surface: wp.array[int],
+               colliders: wp.array[Collider], params: Parameters,
+               forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], ctx: FastContext):
+    i = wp.tid()
+    if ctx.error[0] == 0 and (flags[i] & 1) != 0 and colors[i] == color and (solid[i] == 0 or surface[i] != 0):
+        # Checked path: preparation may have skipped material validation when
+        # friction was zero and the caller enabled it later without prepare().
+        packet = evaluate_fast(positions[i], previous[i], colliders, params)
+        status = int(packet[12])
+        if status == 6:
+            at = wp.atomic_add(ctx.count, 0, 1)
+            if at < ctx.pending.shape[0]:
+                ctx.pending[at] = i
+            else:
+                wp.atomic_max(ctx.error, 0, 49)
+        elif status != 0:
+            wp.atomic_max(ctx.error, 0, 49)
+        else:
+            force, hessian = _fast_terms(packet)
+            forces[i] += force
+            hessians[i] += hessian
+
+
+configure_fast_module(accumulate_fast)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def accumulate_prepared_fast(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3], flags: wp.array[int],
+                        colors: wp.array[int], color: int, solid: wp.array[int], surface: wp.array[int],
+                        colliders: wp.array[Collider], params: Parameters,
+                        forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], ctx: FastContext):
+    i = wp.tid()
+    if ctx.error[0] == 0 and (flags[i] & 1) != 0 and colors[i] == color and (solid[i] == 0 or surface[i] != 0):
+        # Selected only after prepare_colliders checked material poses. Its
+        # preceding ordered launch latches error 48 before this guard runs.
+        packet = _evaluate_prepared_fast(positions[i], previous[i], colliders, params)
+        status = int(packet[12])
+        if status == 6:
+            at = wp.atomic_add(ctx.count, 0, 1)
+            if at < ctx.pending.shape[0]:
+                ctx.pending[at] = i
+            else:
+                wp.atomic_max(ctx.error, 0, 49)
+        elif status != 0:
+            wp.atomic_max(ctx.error, 0, 49)
+        else:
+            force, hessian = _fast_terms(packet)
+            forces[i] += force
+            hessians[i] += hessian
+
+
+configure_fast_module(accumulate_prepared_fast)
+
+
+@cache
+def make_dynamic_accumulate_fast(prepared):
+    """Keep the checked/prepared evaluator and replay policy with a device color."""
+    @wp.kernel(module="unique", enable_backward=False)
+    def dynamic(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3], flags: wp.array[int],
+                colors: wp.array[int], current_color: wp.array[int], solid: wp.array[int], surface: wp.array[int],
+                colliders: wp.array[Collider], params: Parameters,
+                forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], ctx: FastContext):
+        i = wp.tid()
+        if ctx.error[0] == 0 and (flags[i] & 1) != 0 and colors[i] == current_color[0] and (solid[i] == 0 or surface[i] != 0):
+            packet = FastResult()
+            if wp.static(prepared):
+                packet = _evaluate_prepared_fast(positions[i], previous[i], colliders, params)
+            else:
+                packet = evaluate_fast(positions[i], previous[i], colliders, params)
+            status = int(packet[12])
+            if status == 6:
+                at = wp.atomic_add(ctx.count, 0, 1)
+                if at < ctx.pending.shape[0]:
+                    ctx.pending[at] = i
+                else:
+                    wp.atomic_max(ctx.error, 0, 49)
+            elif status != 0:
+                wp.atomic_max(ctx.error, 0, 49)
+            else:
+                force, hessian = _fast_terms(packet)
+                forces[i] += force
+                hessians[i] += hessian
+    configure_fast_module(dynamic)
+    return dynamic
+
+
+@cache
+def make_replay_fast():
+    @wp.kernel(module="unique", enable_backward=False)
+    def replay(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+               colliders: wp.array[Collider], params: Parameters,
+               forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], ctx: FastContext):
+        if ctx.error[0] == 0:
+            for at in range(wp.tid(), wp.min(ctx.count[0], ctx.pending.shape[0]), ctx.workers):
+                i = ctx.pending[at]
+                packet = evaluate(positions[i], previous[i], colliders, params)
+                if packet[41] != wp.float64(0.0):
+                    wp.atomic_max(ctx.error, 0, 49)
+                else:
+                    force, hessian = vertex_terms(packet, wp.float32(params.dt))
+                    if _finite_fast_terms(force, hessian):
+                        forces[i] += force
+                        hessians[i] += hessian
+                    else:
+                        wp.atomic_max(ctx.error, 0, 49)
+    configure_module(replay)
+    return replay
+
+
 class SdfBackend:
     """Persistent prepared collider bank and graph-safe color accumulation."""
     def __init__(self,model,error,*,include_curvature=None,precision=None):
@@ -229,19 +423,18 @@ class SdfBackend:
         # A zero-friction prepare deliberately does not validate material poses.
         self._poses_validated=False
         if precision=="float32":
-            from . import sdf_fast
-            ctx=sdf_fast.Context()
+            ctx=FastContext()
             ctx.pending=wp.empty(model.particle_count,int,device=self.device)
             ctx.count=wp.zeros(1,int,device=self.device)
             ctx.error=error
             ctx.workers=self.device.sm_count*128 if self.device.is_cuda else 1
             self.fast_context=ctx
-            self._fast_accumulate=sdf_fast.accumulate
-            self._checked_accumulate=sdf_fast.accumulate
-            self._prepared_accumulate=sdf_fast.accumulate_prepared
-            self._checked_dynamic=sdf_fast.make_dynamic_accumulate(False)
-            self._prepared_dynamic=sdf_fast.make_dynamic_accumulate(True)
-            self._replay=sdf_fast.make_replay()
+            self._fast_accumulate=accumulate_fast
+            self._checked_accumulate=accumulate_fast
+            self._prepared_accumulate=accumulate_prepared_fast
+            self._checked_dynamic=make_dynamic_accumulate_fast(False)
+            self._prepared_dynamic=make_dynamic_accumulate_fast(True)
+            self._replay=make_replay_fast()
 
     def prepare(self,dt):
         self.params.dt=dt

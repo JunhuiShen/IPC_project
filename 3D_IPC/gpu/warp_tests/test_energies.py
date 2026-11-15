@@ -7,7 +7,7 @@ import warp as wp
 import newton
 
 from gpu import energy as m
-from gpu import kernels
+from gpu import solver as kernels
 from gpu.scene import SCHEMA, create_model
 
 

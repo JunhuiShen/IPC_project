@@ -17,7 +17,7 @@ _gpu_path = str(Path(__file__).resolve().parents[1])
 if _gpu_path not in gpu.__path__:
     gpu.__path__.append(_gpu_path)
 
-from gpu import sdf, sdf_fast as fast
+from gpu import sdf
 
 
 @wp.kernel(module="unique", enable_backward=False)
@@ -40,13 +40,13 @@ def _oracle(q: wp.array[wp.vec3], previous: wp.array[wp.vec3],
 @wp.kernel(module="unique", enable_backward=False)
 def _compact(q: wp.array[wp.vec3], previous: wp.array[wp.vec3],
              colliders: wp.array[sdf.Collider], params: sdf.Parameters,
-             result: wp.array[fast.Result]):
+             result: wp.array[sdf.FastResult]):
     i = wp.tid()
-    result[i] = fast.evaluate(q[i], previous[i], colliders, params)
+    result[i] = sdf.evaluate_fast(q[i], previous[i], colliders, params)
 
 
 sdf.configure_module(_oracle)
-fast.configure_module(_compact)
+sdf.configure_fast_module(_compact)
 
 
 def _record(kind, *, point=(0, 0, 0), axis=(0, 1, 0), radius=1.0,
@@ -102,7 +102,7 @@ class SdfPrecisionTests(unittest.TestCase):
         packets = wp.empty(n, sdf.Packet, device=data.q.device)
         forces = wp.empty(n, wp.vec3, device=data.q.device)
         hessians = wp.empty(n, wp.mat33, device=data.q.device)
-        compact = wp.empty(n, fast.Result, device=data.q.device)
+        compact = wp.empty(n, sdf.FastResult, device=data.q.device)
         wp.launch(_oracle, n, [data.q, data.previous, data.backend.colliders,
                               data.backend.params, packets, forces, hessians], device=data.q.device)
         wp.launch(_compact, n, [data.q, data.previous, data.backend.colliders,

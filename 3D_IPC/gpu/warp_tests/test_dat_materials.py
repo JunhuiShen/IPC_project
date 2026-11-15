@@ -9,8 +9,7 @@ import newton
 from newton.solvers import SolverVBD
 from newton._src.solvers.vbd import particle_vbd_kernels as stock
 from gpu import energy
-from gpu import dat_materials as material
-from gpu import dat_material_kernels as kernels
+from gpu import dat_energies as energies
 from gpu.warp_tests.test_energies import _gradient,_membrane_energy,_hinge_energy,_hinge_angle,_solid_energy
 
 
@@ -18,7 +17,7 @@ from gpu.warp_tests.test_energies import _gradient,_membrane_energy,_hinge_energ
 def _tri_probe(x:wp.array[wp.vec3],previous:wp.array[wp.vec3],triangles:wp.array2d[int],inverse:wp.mat22,
     area:float,mu:float,lam:float,own_materials:wp.array2d[float],forces:wp.array[wp.vec3],hessians:wp.array[wp.mat33]):
     role=wp.tid()
-    f,h=material.evaluate_own_membrane_force_hessian(0,role,x,previous,triangles,inverse,area,mu,lam,123.0,.1,own_materials)
+    f,h=energies.evaluate_own_membrane_force_hessian(0,role,x,previous,triangles,inverse,area,mu,lam,123.0,.1,own_materials)
     forces[role]=f;hessians[role]=h
 
 
@@ -28,7 +27,7 @@ def _small_strain_probe(x:wp.array[wp.vec3],triangles:wp.array2d[int],own_materi
     i=wp.tid()
     f,h=stock.evaluate_neo_hookean_membrane_force_hessian(i,1,x,x,triangles,wp.identity(n=2,dtype=float),
         1.0,1000.0,1000.0,0.0,.1)
-    own_f,own_h=material.evaluate_own_membrane_force_hessian(i,1,x,x,triangles,wp.identity(n=2,dtype=float),
+    own_f,own_h=energies.evaluate_own_membrane_force_hessian(i,1,x,x,triangles,wp.identity(n=2,dtype=float),
         1.0,1000.0,1000.0,0.0,.1,own_materials)
     native_force[i]=f;own_force[i]=own_f
 
@@ -37,7 +36,7 @@ def _small_strain_probe(x:wp.array[wp.vec3],triangles:wp.array2d[int],own_materi
 def _bend_probe(x:wp.array[wp.vec3],previous:wp.array[wp.vec3],edges:wp.array2d[int],rest:wp.array[float],
     length:wp.array[float],coefficient:wp.array[float],stiffness:wp.array[float],forces:wp.array[wp.vec3],hessians:wp.array[wp.mat33]):
     role=wp.tid()
-    f,h=material.evaluate_own_bending_force_hessian(0,role,x,previous,edges,rest,length,99.0,12.0,.1,coefficient,stiffness)
+    f,h=energies.evaluate_own_bending_force_hessian(0,role,x,previous,edges,rest,length,99.0,12.0,.1,coefficient,stiffness)
     forces[role]=f;hessians[role]=h
 
 
@@ -47,7 +46,7 @@ def _matched_bend_probe(x:wp.array[wp.vec3],edges:wp.array2d[int],rest:wp.array[
     own_f:wp.array[wp.vec3],own_h:wp.array[wp.mat33]):
     role=wp.tid()
     f,h=stock.evaluate_dihedral_angle_based_bending_force_hessian(0,role,x,x,edges,rest,length,.001,0.0,.1)
-    pf,ph=material.evaluate_own_bending_force_hessian(0,role,x,x,edges,rest,length,.001,0.0,.1,coefficient,stiffness)
+    pf,ph=energies.evaluate_own_bending_force_hessian(0,role,x,x,edges,rest,length,.001,0.0,.1,coefficient,stiffness)
     native_f[role]=f;native_h[role]=h;own_f[role]=pf;own_h[role]=ph
 
 
@@ -56,7 +55,7 @@ def _tet_probe(x:wp.array[wp.vec3],previous:wp.array[wp.vec3],tets:wp.array2d[in
     grad:wp.array2d[wp.vec3],measure:wp.array[float],mu:float,lam:float,
     forces:wp.array[wp.vec3],hessians:wp.array[wp.mat33]):
     role=wp.tid()
-    f,h=material.evaluate_own_solid_force_hessian(0,role,previous,x,tets,inverse,mu,lam,19.0,.1,grad,measure)
+    f,h=energies.evaluate_own_solid_force_hessian(0,role,previous,x,tets,inverse,mu,lam,19.0,.1,grad,measure)
     forces[role]=f;hessians[role]=h
 
 
@@ -86,20 +85,20 @@ class StockLayoutMaterialTests(unittest.TestCase):
     def ar(self,x,dtype):return wp.array(x,dtype=dtype,device=self.device)
 
     def test_static_guard_preserves_original_tile_scalar_inverse_and_updates(self):
-        receipt=kernels.assert_stock_layout()
+        receipt=energies.assert_stock_layout()
         self.assertTrue(all(x['unchanged_non_energy_ast'] for x in receipt.values()))
         original=inspect.getsource
         def damaged(function):
             source=original(function)
-            if function is kernels.make_solve_elasticity_tile:
+            if function is energies.make_solve_elasticity_tile:
                 source=source.replace('h_inv = wp.inverse(h_total)','h_inv = h_total')
             return source
-        with mock.patch.object(kernels.inspect,'getsource',side_effect=damaged):
-            with self.assertRaisesRegex(AssertionError,'non-energy body/layout'):kernels.assert_stock_layout()
+        with mock.patch.object(energies.inspect,'getsource',side_effect=damaged):
+            with self.assertRaisesRegex(AssertionError,'non-energy body/layout'):energies.assert_stock_layout()
 
     def test_preparation_keeps_stock_model_arrays_and_hard_flags_unchanged(self):
         model=model_fixture();before=fingerprint(model)
-        data=material.prepare(model)
+        data=energies.prepare(model)
         self.assertEqual(fingerprint(model),before)
         np.testing.assert_array_equal(data.pin_mask.numpy(),np.zeros(4))
         self.assertEqual(data.pin_stiffness,0)
@@ -109,12 +108,12 @@ class StockLayoutMaterialTests(unittest.TestCase):
         mapped=self.ar([.0005],wp.float32);coefficient=self.ar([1],wp.float32)
         mapped_tri=self.ar(model.tri_materials.numpy()[:,:2].copy(),wp.float32)
         model.ipc=SimpleNamespace(dat_bending_stiffness=mapped,edge_coefficient=coefficient,dat_triangle_materials=mapped_tri)
-        again=material.prepare(model)
+        again=energies.prepare(model)
         self.assertIs(again.bending_stiffness,mapped);self.assertIs(again.edge_coefficients,coefficient)
         self.assertIs(again.triangle_materials,mapped_tri)
         self.assertEqual(fingerprint(model),before)
 
-    def test_triangle_force_and_rest_hessian_are_our_energy(self):
+    def test_triangle_uses_own_energy_force_and_native_quasi_newton_rest_hessian(self):
         inverse=np.array([[1.1,-.2],[.05,.9]],np.float32);x=np.array([[.1,-.2,.3],[1.2,.1,.25],[.2,1.1,.55]],np.float32)
         f=wp.empty(3,wp.vec3,device=self.device);h=wp.empty(3,wp.mat33,device=self.device)
         wp.launch(_tri_probe,3,[self.ar(x,wp.vec3),self.ar(x*1.2+.7,wp.vec3),self.ar([[0,1,2]],int),wp.mat22(inverse),.48,99.,111.,self.ar([[17.3,23.1]],wp.float32),f,h],device=self.device)
@@ -124,7 +123,10 @@ class StockLayoutMaterialTests(unittest.TestCase):
         wp.launch(_tri_probe,3,[self.ar(rest,wp.vec3),self.ar(rest+.3,wp.vec3),self.ar([[0,1,2]],int),wp.mat22(np.eye(2)),.5,99.,111.,self.ar([[3.,5.]],wp.float32),f,h],device=self.device)
         gradients=np.array([[-1,-1],[1,0],[0,1]])
         for role,(a,b) in enumerate(gradients):
-            expected_h=.5*np.array([[11*a*a+3*b*b,8*a*b,0],[8*a*b,3*a*a+11*b*b,0],[0,0,0]])
+            # Native PSD quasi-Newton H: the corotated energy gradient above
+            # remains unchanged; this matrix only approximates its local solve.
+            gradient=np.array([a,b,0])
+            expected_h=.5*(3*(a*a+b*b)*np.eye(3)+(5+3)*np.outer(gradient,gradient))
             np.testing.assert_allclose(h.numpy()[role],expected_h,rtol=2e-5,atol=2e-5)
         np.testing.assert_allclose(f.numpy(),0,atol=2e-6)
 
@@ -188,7 +190,7 @@ class StockLayoutMaterialTests(unittest.TestCase):
         builder=newton.ModelBuilder(gravity=(0,0,0))
         builder.add_particles([[.1,-.2,.3],[1,2,3]],[[0,0,0]]*2,[2,1],flags=[1,0],radius=[0,0]);builder.color()
         model=builder.finalize(device='cpu');solver=SolverVBD(model,enable_fast_math=False)
-        before=fingerprint(model);data=material.prepare(model,pin_mask=np.array([1,1],np.int32),
+        before=fingerprint(model);data=energies.prepare(model,pin_mask=np.array([1,1],np.int32),
             pin_targets=np.array([[.3,.1,-.2],[10,20,30]],np.float32),pin_stiffness=7)
         q=model.particle_q;inertia=self.ar(q.numpy()+np.array([.4,-.2,.1],np.float32),wp.vec3)
         contact_f=self.ar([[.2,-.1,.4],[0,0,0]],wp.vec3);contact_h=wp.zeros(2,wp.mat33,device=self.device)
@@ -197,7 +199,7 @@ class StockLayoutMaterialTests(unittest.TestCase):
             model.tri_indices,model.tri_poses,model.tri_materials,model.tri_areas,model.edge_indices,
             model.edge_rest_angle,model.edge_rest_length,model.edge_bending_properties,
             model.tet_indices,model.tet_poses,model.tet_materials,solver.particle_adjacency,contact_f,contact_h]
-        wp.launch(kernels.solve_elasticity,2,[*arguments,*data.arguments(),displacements],device=self.device)
+        wp.launch(energies.solve_elasticity,2,[*arguments,*data.arguments(),displacements],device=self.device)
         point=q.numpy()[0];force=2*16*(inertia.numpy()[0]-point)-7*(point-data.pin_targets.numpy()[0])+contact_f.numpy()[0]
         expected=old[0]+np.linalg.inv(np.eye(3,dtype=np.float32)*39)@force
         np.testing.assert_allclose(displacements.numpy()[0],expected,rtol=3e-6,atol=3e-6)

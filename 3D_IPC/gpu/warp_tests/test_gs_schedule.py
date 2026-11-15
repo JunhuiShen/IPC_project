@@ -9,8 +9,8 @@ import warp as wp
 import newton
 
 from newton._src.geometry.tri_mesh_collision import build_tri_mesh_collision_info
-from gpu import kernels
-from gpu.gs import GsSchedule, make_dynamic_elasticity
+from gpu import solver as kernels
+from gpu.solver import GsSchedule, make_dynamic_elasticity
 
 
 TRIANGLES = [[1, 2, 3], [4, 5, 6]]

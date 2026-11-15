@@ -7,7 +7,7 @@ import numpy as np
 import warp as wp
 
 from gpu import contact
-from gpu.gs import GsSchedule
+from gpu.solver import GsSchedule
 from gpu.movement_box_queries import BoxProof, GsBoxEpochFilter, _box_certificate, build_nodes
 from gpu.warp_build import configure_module
 

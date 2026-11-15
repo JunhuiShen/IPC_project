@@ -3,8 +3,7 @@ import unittest
 import numpy as np
 import warp as wp
 from gpu import contact
-from gpu.contact_original import (ContactBackendIPC,HEADERS,evaluate_original,
-    needs_original_evaluation,configure_module)
+from gpu.contact import ContactBackendIPC, ORIGINAL_HEADERS as HEADERS, evaluate_original, needs_original_evaluation, configure_original_module as configure_module
 
 
 @wp.kernel

@@ -2,11 +2,11 @@
 
 The upstream step, prediction, detection, clipping, local inverse and velocity
 publication are inherited. The original particle-iteration AST is changed only
-at energy kernel bindings, their extra energy inputs and exact-energy replay.
+at energy kernel bindings and their extra energy inputs.
 No global upstream function or kernel is modified.
 """
 from __future__ import annotations
-import ast,copy,hashlib,importlib,inspect,json,textwrap
+import ast,copy,hashlib,importlib,inspect
 from pathlib import Path
 import numpy as np
 import warp as wp
@@ -15,9 +15,7 @@ from . import select_newton_runtime
 select_newton_runtime('reference')
 
 from newton.solvers import SolverVBD
-from .dat_contacts import EnergyWorkspace
-from .dat_materials import prepare as prepare_materials
-from . import dat_material_kernels
+from . import dat_energies as energies
 
 _ORIGINAL = Path(__file__).resolve().parent / 'third_party/newton_reference/newton/_src/solvers/vbd/solver_vbd.py'
 # An overlay test can point at the same pinned original; the production path
@@ -53,8 +51,7 @@ def _energy_iteration():
                 inputs.elts[11]=expression('self._energy_friction')
                 inputs.elts[12]=expression('self._energy_eps_v')
                 inputs.elts.append(expression('self._energy_contacts.begin(dt,self._energy_dhat,self._energy_friction,self._energy_eps_v)'))
-                replay=ast.parse('self._energy_contacts.resolve(state_in.particle_q,self.particle_q_prev,self.model.particle_colors,color,self.particle_forces,self.particle_hessians)').body[0]
-                return [node,replay]
+                return node
             if name in ('self._tiled_elasticity_kernel','solve_elasticity'):
                 counts['tile' if name.startswith('self.') else 'scalar']+=1
                 if name=='solve_elasticity':target.value=expression('_own_solve_elasticity')
@@ -72,7 +69,7 @@ def _energy_iteration():
             call=node.value
             if isinstance(call,ast.Call) and isinstance(call.func,ast.Attribute):
                 label=ast.unparse(call.func)
-                if label in ('self._energy_contacts.resolve','self._accumulate_own_sdf'):
+                if label=='self._accumulate_own_sdf':
                     return None
                 if call.func.attr=='launch':
                     keywords={k.arg:k for k in call.keywords};target=keywords.get('kernel')
@@ -94,7 +91,7 @@ def _energy_iteration():
     function.decorator_list=[]
     module=ast.fix_missing_locations(ast.Module(body=[function],type_ignores=[]))
     native=importlib.import_module(SolverVBD.__module__)
-    globals_=dict(vars(native));globals_['_own_solve_elasticity']=dat_material_kernels.solve_elasticity
+    globals_=dict(vars(native));globals_['_own_solve_elasticity']=energies.solve_elasticity
     globals_['__name__']=__name__
     exec(compile(module,str(_ORIGINAL),'exec'),globals_)
     return globals_['_solve_particle_iteration'],counts
@@ -122,7 +119,7 @@ class SolverDAT(SolverVBD):
         self.params=p;self.error=wp.zeros(1,int,device=model.device);self._failed=False
         self.ccd_backend=None;self._guess_requested=False
         super().__init__(model,iterations=iterations,**stock_options)
-        self._energy_materials=prepare_materials(model)
+        self._energy_materials=energies.prepare(model)
         overrides={} if energy_overrides is None else dict(energy_overrides)
         self._energy_dhat=float(overrides.get('d_hat',p.get('d_hat',getattr(self,'particle_self_contact_margin',.002))))
         self._energy_friction=float(overrides.get('friction',p.get('friction_coefficient',model.soft_contact_mu)))
@@ -131,18 +128,16 @@ class SolverDAT(SolverVBD):
             raise ValueError('Invalid own contact energy parameters')
         self._energy_contacts=None
         self._contact_k_barrier=float(overrides.get('k_barrier',p.get('k_barrier',100)))
-        self._contact_exact_geometry=bool(overrides.get('exact_geometry',p.get('exact_computation_fallback',True)))
-        self._contact_precision=contact_precision
         if self.particle_enable_self_contact:
-            self._energy_contacts=EnergyWorkspace(self.trimesh_collision_info,device=model.device,
-                k_barrier=self._contact_k_barrier,exact_geometry=self._contact_exact_geometry,
+            self._energy_contacts=energies.EnergyWorkspace(self.trimesh_collision_info,device=model.device,
+                k_barrier=self._contact_k_barrier,
                 precision=contact_precision,error=self.error)
         if self.use_particle_tile_solve:
             include_tets=model.tet_count>0
             native=importlib.import_module(SolverVBD.__module__)
             include_triangles=not native._is_tet_only_elasticity_model(model)
             two=not include_tets
-            self._tiled_elasticity_kernel=dat_material_kernels.make_solve_elasticity_tile(include_triangles,include_tets,two)
+            self._tiled_elasticity_kernel=energies.make_solve_elasticity_tile(include_triangles,include_tets,two)
             options=wp.get_module_options(native.make_solve_elasticity_tile(include_triangles,include_tets,two).module)
             self._set_module_options({k:options[k] for k in ('fast_math','fuse_fp') if k in options},module=self._tiled_elasticity_kernel.module)
         self.sdf_backend=None
@@ -153,9 +148,16 @@ class SolverDAT(SolverVBD):
         self.configuration={'algorithm':'unmodified native DAT execution; energy-only substitutions',
             'predictor':'native forward_step','local_solve':'native determinant/inverse',
             'source_commit':'f89e82fed043fe78d1844b26d3f289a25db03810',
+            'energy_membrane':{'force':'corotated','hessian':'native PSD approximation',
+                               'singular_geometry':'native area-ratio floor'},
+            'energy_bending':{'evaluator':'native with stiffness mapping','degeneracy':'native guards'},
             'energy_contact':{'d_hat':self._energy_dhat,'friction':self._energy_friction,'eps_v':self._energy_eps_v,
-                              'k_barrier':self._contact_k_barrier,'exact_geometry':self._contact_exact_geometry,
-                              'precision':contact_precision}}
+                              'k_barrier':self._contact_k_barrier,'exact_geometry':False,
+                              'precision':contact_precision,
+                              'distance':'reference float32 closest-point routines',
+                              'normal_hessian':'native rank-one approximation',
+                              'friction_evaluator':'native reference routine',
+                              'precision_replay':'none'}}
         if self.sdf_backend is not None:
             self.configuration['energy_sdf']={
                 'precision':self.sdf_backend.precision,

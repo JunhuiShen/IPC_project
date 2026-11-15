@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import unittest
 import numpy as np
 import warp as wp
-from gpu.parallel_colors import ParallelColors
+from gpu.solver import ParallelColors
 from gpu.policies import _color_graph
 from .test_parallel_levels import make_graph
 

@@ -5,7 +5,7 @@ import numpy as np
 import warp as wp
 import newton
 
-from gpu.dat_stock_scene import attach_stock_ipc
+from gpu.dat_twist import attach_stock_ipc
 from gpu.sdf import pack_colliders
 from gpu.solver_dat import SolverDAT
 

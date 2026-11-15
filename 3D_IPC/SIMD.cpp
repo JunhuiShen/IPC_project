@@ -2,7 +2,7 @@
 #include "corotated_energy.h"
 #include "bending_energy.h"
 #include "friction_energy.h"
-#include "general_simd_cloth.h"
+#include "general_simd.h"
 
 #include <algorithm>
 #include <cassert>

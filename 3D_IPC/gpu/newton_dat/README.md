@@ -44,7 +44,7 @@ the GS fork's `SolverVBD`, inherits its timestep and particle color loop, and
 supplies our energies, IPC contact and CCD through those hooks.
 [DAT with our energies](../solver_dat.py) instead uses the pristine snapshot
 and retains its DAT motion limits while substituting energy evaluations.
-[Reference DAT](../solver_dat_reference.py) exposes the pristine solver directly.
+[Reference DAT](../__init__.py) exposes the pristine solver directly.
 See the [GPU README](../README.md) for the three solver choices and run commands.
 
 ## Install on biot or another CUDA 12 Linux x86-64 machine

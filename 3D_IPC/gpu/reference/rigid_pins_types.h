@@ -1,4 +1,4 @@
 #pragma once
 
 // One maintained arithmetic implementation shared with the production GPU solver.
-#include "../rigid_pins_types.h"
+#include "../rigid_types.h"

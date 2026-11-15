@@ -32,16 +32,15 @@ import time
 def _source_hashes(root):
     result = {}
     for name in (
-        "gpu/dat_twist.py", "gpu/stock_twist.py", "gpu/solver_dat.py",
-        "gpu/dat_contacts.py", "gpu/dat_contact_fast.py", "gpu/dat_contact_fast.cuh",
-        "gpu/dat_material_kernels.py", "gpu/dat_materials.py", "gpu/dat_stock_scene.py",
-        "gpu/contact.py", "gpu/contact.cuh", "gpu/contact_exact.py", "gpu/contact_exact.cuh",
-        "gpu/solver.py", "gpu/gs.py", "gpu/kernels.py",
+        "gpu/__init__.py", "gpu/dat_twist.py", "gpu/solver_dat.py",
+        "gpu/dat_energies.py",
+        "gpu/contact.py", "gpu/contact.cuh", "gpu/contact_exact.cuh",
+        "gpu/solver.py",
         "gpu/ccd.py", "gpu/ccd.cuh", "gpu/query_groups.py", "gpu/warp_build.py",
         "gpu/exact.cuh", "gpu/original_ccd.cuh", "gpu/original_rigid.cuh", "gpu/direct_bound.cuh",
         "gpu/separation.cuh", "gpu/global_guess.cuh", "gpu/newton_dat/export_twist_trajectory.py",
-        "gpu/movement_box_queries.py", "gpu/contact_grouped_exact.py", "gpu/policies.py",
-        "gpu/gs_contact_fast.py", "gpu/contact_original.py", "gpu/sdf.py", "gpu/sdf_fast.py",
+        "gpu/movement_box_queries.py", "gpu/policies.py",
+        "gpu/sdf.py", "gpu/sdf.cuh", "gpu/rigid.py", "gpu/rigid.cuh", "gpu/rigid_types.h",
         "gpu/energy.py", "gpu/cloth_math.cuh", "gpu/solid_math.cuh", "gpu/solve.cuh",
         "gpu/third_party/newton_reference/newton/_src/solvers/vbd/solver_vbd.py",
         "gpu/third_party/newton_reference/newton/_src/solvers/vbd/particle_vbd_kernels.py",
@@ -90,7 +89,7 @@ def main(argv=None):
     def solver_factory(model, **stock_options):
         if own_module is None:
             return native_solver(model, **stock_options)
-        from gpu.dat_stock_scene import attach_stock_ipc
+        from gpu.dat_twist import attach_stock_ipc
 
         bridge_receipts.append(attach_stock_ipc(model, gs_predictor="colored" if args.variant == "gs" else "none"))
         if args.variant == "gs":
@@ -181,8 +180,12 @@ def main(argv=None):
             "gs_initial_guess": "colored" if args.variant == "gs" else None,
             "gs_parameters": dict(example.model.ipc.params) if args.variant == "gs" else None,
             "contact_precision": getattr(example.solver.contact_backend, "grouped_precision", "float64") if args.variant == "gs" else getattr(getattr(example.solver, "_energy_contacts", None), "precision", "upstream float32"),
-            "energy_formulas": ("project corotated/hinge and IPC barrier/friction, full geometric diagonal Hessian"
-                                if own_module else "pinned upstream DAT energy laws and native contact Hessian"),
+            "energy_formulas": (
+                "project corotated/hinge and IPC barrier/friction, full geometric diagonal Hessian"
+                if args.variant == "gs" else
+                "project corotated/hinge and IPC barrier; native PSD material Hessian, rank-one contact Hessian and native friction"
+                if args.variant == "own" else
+                "pinned upstream DAT energy laws and native contact Hessian"),
             "native_triangle_material_values": np.unique(material, axis=0).tolist(),
             "native_bending_material_values": np.unique(bending, axis=0).tolist(),
             "native_soft_contact_stiffness": float(example.model.soft_contact_ke),

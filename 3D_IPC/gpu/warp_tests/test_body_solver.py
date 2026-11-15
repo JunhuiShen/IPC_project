@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 import warp as wp
 
-from gpu import body_solver
+from gpu import rigid
 from gpu.scene import SCHEMA, create_model
 from gpu.solver import SolverIPC
 
@@ -41,14 +41,11 @@ def body_payload(centers=((0.0, 2.0, 0.0),), *, rotate=False):
 def _pair(q: wp.array[wp.vec3], reference: wp.array[wp.vec3], owners: wp.array[int],
            target_center: wp.vec3, target_rotation: wp.quat, rotational: int,
            exact_geometry: int, words: wp.array[wp.uint32], slots: wp.array[int], result: wp.array[wp.vec2d]):
-    result[0] = body_solver.certify_pair(q, reference, owners, wp.vec4i(0, 1, 2, 3), 0, 0,
+    result[0] = rigid.certify_pair(q, reference, owners, wp.vec4i(0, 1, 2, 3), 0, 0,
         wp.vec3(0.0), wp.quat_identity(), target_center, target_rotation, rotational, exact_geometry, words, slots, 0)
 
 
-body_solver.contact.configure_module(__name__, include_filter=False)
-body_solver.rigid.configure_module(__name__)
-body_solver.sdf.configure_module(__name__)
-body_solver.configure_module(__name__, ("rigid_ccd.cuh", "original_rigid.cuh"))
+rigid.configure_body_module(__name__)
 
 
 class BodySolverTests(unittest.TestCase):
