@@ -474,7 +474,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 # Example 12: three cloth layers with one fixed edge and one oscillating edge
 OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread OMP_PLACES=cores \
 ./build/3D_sim --example 12 --fps 30 --exact_computation_fallback false --ccd_exact_step_bound false --num_frames 200 \
-  --substeps 6 --max_substep_iters 2 --fixed_iters \
+  --substeps 10 --max_substep_iters 10 --fixed_iters \
   --node_box_min 0.0001 --node_box_max 0.01 --node_box_update_count 2 \
   --friction_coefficient 0.1 --friction_velocity_epsilon 0.01 \
   --kB 0.01 --gy 0 \
