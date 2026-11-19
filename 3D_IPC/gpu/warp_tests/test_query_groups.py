@@ -3,6 +3,7 @@
 from collections import Counter
 from copy import deepcopy
 from types import SimpleNamespace
+from unittest.mock import patch
 import unittest
 
 import numpy as np
@@ -11,7 +12,7 @@ import warp as wp
 from newton._src.geometry.tri_mesh_collision import build_tri_mesh_collision_info
 
 from gpu.contact import ContactBackend
-from gpu.ccd import CcdBackend
+from gpu.ccd import CcdBackend, get_resolver
 from gpu.policies import InitialGuess, PredictorGraph
 from gpu.query_groups import QueryGroups
 from gpu.run import FrameGraph
@@ -393,7 +394,7 @@ class GroupQueryTests(unittest.TestCase):
                 results.append(actual)
             np.testing.assert_array_equal(results[0], results[1], "Generic default dispatch must stay unchanged")
 
-    def test_independent_predictor_requires_grouped_original_mode_and_solver_opt_in(self):
+    def test_independent_predictor_requires_grouped_colored_mode_and_solver_opt_in(self):
         params = {"use_colored_ccd_guess": True, "colored_ccd_guess_iters": 1,
                   "colored_ccd_guess_fraction": 1.0}
         for device in self.devices:
@@ -403,9 +404,9 @@ class GroupQueryTests(unittest.TestCase):
                 InitialGuess(ccd, detector, params=params, independent_colors=True)
             policy = InitialGuess(ccd, detector, params=params, use_group_queries=True, independent_colors=True)
             initial = q.numpy().copy()
-            for mode in ({"use_ccd_guess": True}, {"use_colored_ccd_guess_level_based": True}):
+            for mode in ({"use_ccd_guess": True}, {}):
                 wrong = {**mode, "colored_ccd_guess_iters": 1, "colored_ccd_guess_fraction": 1.0}
-                with self.assertRaisesRegex(ValueError, "original colored CCD mode"):
+                with self.assertRaisesRegex(ValueError, "colored CCD mode"):
                     policy.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, wrong)
                 np.testing.assert_array_equal(q.numpy(), initial)
             for mode in ("colored", "level", "global"):
@@ -414,38 +415,132 @@ class GroupQueryTests(unittest.TestCase):
                     use_colored_ccd_guess_level_based=mode == "level", colored_ccd_guess_iters=1,
                     colored_ccd_guess_fraction=1.0)
                 solver = SolverIPC(create_model(payload, device), allow_cpu=True)
-                self.assertEqual(solver.ccd_backend._initial_guess.independent_colors, mode == "colored")
+                self.assertEqual(solver.ccd_backend._initial_guess.independent_colors, mode in ("colored", "level"))
+
+    def test_level_probe_and_update_clip_unrelated_vertices_independently(self):
+        params = {"use_colored_ccd_guess_level_based": True, "colored_ccd_guess_iters": 1,
+                  "colored_ccd_guess_fraction": 1.0}
+        for device in self.devices:
+            for exact, direct in ((False, False), (True, False), (True, True)):
+                with self.subTest(device=str(device), exact=exact, direct=direct):
+                    q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+                    ccd = CcdBackend(contacts, node_box_radius=1, exact_geometry=exact,
+                                     exact_step_bound=direct)
+                    policy = InitialGuess(ccd, detector, params=params, use_group_queries=True,
+                                          independent_colors=True)
+                    initial = q.numpy().copy()
+                    original_sweep = policy._sweep
+                    starts, ends, maps, independent_flags = [], [], [], []
+
+                    def record(q, colors, dt, **kwargs):
+                        starts.append(q.numpy().copy())
+                        maps.append(colors.numpy().copy())
+                        independent_flags.append(kwargs.get("independent", False))
+                        original_sweep(q, colors, dt, **kwargs)
+                        ends.append(q.numpy().copy())
+
+                    with patch.object(policy, "_sweep", side_effect=record):
+                        policy.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, params)
+                    ccd.check()
+                    self.assertEqual(independent_flags, [True, True],
+                                     "Both the discarded probe and updating sweep must be independent")
+                    self.assertEqual(len(ends), 2)
+                    target = policy.targets.numpy()
+                    for mapping, start, end in zip(maps, starts, ends):
+                        self.assertEqual(mapping[0], mapping[4],
+                                         "Blocked and free vertices must share the tested group")
+                        np.testing.assert_array_equal(start, initial, "Probe must be discarded")
+                        np.testing.assert_array_equal(end[4], target[4])
+                        np.testing.assert_array_equal(end[1:4], initial[1:4])
+                        self.assertGreater(float(end[0, 2]), 0.)
+                        self.assertLess(float(end[0, 2]), float(initial[0, 2]))
+                    np.testing.assert_array_equal(q.numpy(), ends[1])
+                    # A singleton query is an independent clipping oracle:
+                    # only the blocked point proposes motion; the unrelated
+                    # point cannot participate in any common shortening.
+                    singleton_target = initial.copy()
+                    singleton_target[0] = target[0]
+                    singleton = wp.array(initial, wp.vec3, device=device)
+                    oracle = CcdBackend(contacts, node_box_radius=1, exact_geometry=exact,
+                                        exact_step_bound=direct)
+                    oracle._resolve = get_resolver("bound" if direct else "cached")
+                    oracle.accept(singleton, wp.array(singleton_target, wp.vec3, device=device),
+                                  -1, .01, bounded=False, preserve_gap=True)
+                    oracle.check()
+                    np.testing.assert_array_equal(q.numpy()[0], singleton.numpy()[0])
+
+    def test_level_zero_fraction_does_not_freeze_an_unrelated_vertex(self):
+        params = {"use_colored_ccd_guess_level_based": True, "colored_ccd_guess_iters": 1,
+                  "colored_ccd_guess_fraction": 1.0}
+        for device in self.devices:
+            with self.subTest(device=str(device)):
+                q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+                initial = q.numpy().copy()
+                initial[0, 2] = np.float32(1.e-11)
+                self.assertGreater(float(initial[0, 2]), 0., "Use a separated, noncoincident start")
+                q.assign(initial)
+                ccd = CcdBackend(contacts, node_box_radius=1, exact_geometry=False)
+                policy = InitialGuess(ccd, detector, params=params, use_group_queries=True,
+                                      independent_colors=True)
+                original_sweep = policy._sweep
+                starts, ends, maps, independent_flags = [], [], [], []
+
+                def record(q, colors, dt, **kwargs):
+                    starts.append(q.numpy().copy())
+                    maps.append(colors.numpy().copy())
+                    independent_flags.append(kwargs.get("independent", False))
+                    original_sweep(q, colors, dt, **kwargs)
+                    ends.append(q.numpy().copy())
+
+                with patch.object(policy, "_sweep", side_effect=record):
+                    policy.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, params)
+                ccd.check()
+                self.assertEqual(independent_flags, [True, True])
+                for mapping, start, end in zip(maps, starts, ends):
+                    self.assertEqual(mapping[0], mapping[4])
+                    np.testing.assert_array_equal(start, initial, "Probe must be discarded")
+                    np.testing.assert_array_equal(end[0], initial[0],
+                        "Original exact-OFF CCD returns TOI=0 below its 1e-10 starting-gap threshold")
+                    np.testing.assert_array_equal(end[4], policy.targets.numpy()[4],
+                        "A zero fraction belongs to the blocked vertex, not the whole group")
+                    np.testing.assert_array_equal(end[1:4], initial[1:4])
+                np.testing.assert_array_equal(q.numpy(), ends[1])
 
     def test_independent_predictor_capture_replay_matches_eager_and_full_free_target(self):
         devices = wp.get_cuda_devices()
         if not devices:
             self.skipTest("No CUDA device")
-        params = {"use_colored_ccd_guess": True, "colored_ccd_guess_iters": 1,
-                  "colored_ccd_guess_fraction": 1.0}
         for device in devices:
-            q, model, contacts, detector, velocity = independent_predictor_fixture(device)
-            ccd = CcdBackend(contacts, node_box_radius=1)
-            policy = InitialGuess(ccd, detector, params=params, use_group_queries=True, independent_colors=True)
-            start, previous, inertia = wp.clone(q), wp.clone(q), wp.empty_like(q)
+            for level in (False, True):
+                for exact in (False, True):
+                    with self.subTest(device=str(device), level=level, exact=exact):
+                        params = {"use_colored_ccd_guess": not level,
+                                  "use_colored_ccd_guess_level_based": level,
+                                  "colored_ccd_guess_iters": 1, "colored_ccd_guess_fraction": 1.0}
+                        q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+                        ccd = CcdBackend(contacts, node_box_radius=1, exact_geometry=exact)
+                        policy = InitialGuess(ccd, detector, params=params, use_group_queries=True,
+                                              independent_colors=True)
+                        start, previous, inertia = wp.clone(q), wp.clone(q), wp.empty_like(q)
 
-            def run():
-                wp.copy(q, start)
-                policy.apply(q, previous, velocity, inertia, .01, params)
+                        def run():
+                            wp.copy(q, start)
+                            policy.apply(q, previous, velocity, inertia, .01, params)
 
-            run()
-            with wp.ScopedCapture(device=device) as capture:
-                run()
-            for free_velocity in ([30, -10, 20], [-40, 15, -5]):
-                values = velocity.numpy(); values[4] = free_velocity; velocity.assign(values)
-                run()
-                ccd.check()
-                expected = q.numpy().copy()
-                wp.capture_launch(capture.graph)
-                ccd.check()
-                actual = q.numpy()
-                np.testing.assert_array_equal(actual, expected)
-                np.testing.assert_array_equal(actual[4], policy.targets.numpy()[4])
-                self.assertGreater(float(actual[0, 2]), 0)
+                        run()
+                        with wp.ScopedCapture(device=device) as capture:
+                            run()
+                        for free_velocity in ([30, -10, 20], [-40, 15, -5]):
+                            values = velocity.numpy(); values[4] = free_velocity; velocity.assign(values)
+                            run()
+                            ccd.check()
+                            expected = q.numpy().copy()
+                            wp.capture_launch(capture.graph)
+                            ccd.check()
+                            actual = q.numpy()
+                            np.testing.assert_array_equal(actual, expected)
+                            np.testing.assert_array_equal(actual[4], policy.targets.numpy()[4])
+                            self.assertGreater(float(actual[0, 2]), 0)
 
 
 if __name__ == "__main__":

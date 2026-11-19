@@ -7,6 +7,7 @@ Newton snapshot before constructing models or solvers.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import sys
 from types import SimpleNamespace
@@ -83,12 +84,17 @@ def rest_edge_coefficients(triangles,areas,edges,rest_lengths):
 
 
 def attach_stock_ipc(model,*,fps=60,substeps=10,iterations=4,d_hat=.002,k_barrier=100.,
-                     friction=.2,eps_v=.01,exact_geometry=True,gs_predictor='colored',bending_mapping='matched-effective'):
+                     friction=.2,eps_v=.01,exact_geometry=True,gs_predictor='colored',bending_mapping='matched-effective',
+                     colored_ccd_guess_iters=1,colored_ccd_guess_fraction=1.):
     """Add only model.ipc; stock material/flags/colors/rest/state arrays stay intact."""
     import warp as wp
     if hasattr(model,'ipc'):raise ValueError('Bridge requires an unmodified stock model')
     if model.body_count or model.tet_count:raise ValueError('This bridge is for the official cloth twist model')
     if gs_predictor not in ('none','global','colored','level'):raise ValueError('Unknown explicit GS predictor')
+    if isinstance(colored_ccd_guess_iters,bool) or not isinstance(colored_ccd_guess_iters,int) or colored_ccd_guess_iters<0:
+        raise ValueError('Colored CCD updating cap must be a nonnegative integer')
+    if isinstance(colored_ccd_guess_fraction,bool) or not math.isfinite(colored_ccd_guess_fraction) or not 0<=colored_ccd_guess_fraction<=1:
+        raise ValueError('Colored CCD target fraction must be finite and in [0,1]')
     before=model_array_snapshot(model)
     q=model.particle_q.numpy();mass=model.particle_mass.numpy();flags=model.particle_flags.numpy()
     triangles=model.tri_indices.numpy();areas=model.tri_areas.numpy();edges=model.edge_indices.numpy()
@@ -119,7 +125,7 @@ def attach_stock_ipc(model,*,fps=60,substeps=10,iterations=4,d_hat=.002,k_barrie
        'node_box_max':budget,'node_box_min':min(.001,budget),'node_box_update_count':int(iterations),
        'theta_box_min':.01,'theta_box_max':.1,'use_ccd':True,'use_ccd_guess':gs_predictor=='global',
        'use_colored_ccd_guess':gs_predictor=='colored','use_colored_ccd_guess_level_based':gs_predictor=='level',
-       'colored_ccd_guess_iters':1,'colored_ccd_guess_fraction':1.,'use_jacobi_level_based_ccd':False,
+       'colored_ccd_guess_iters':colored_ccd_guess_iters,'colored_ccd_guess_fraction':float(colored_ccd_guess_fraction),'use_jacobi_level_based_ccd':False,
        'use_dat':False,'use_ogc':False,'use_cloth_grid':False,'use_parallel':True,'use_simd':False,
        'dat_gamma':gamma,'dat_query_radius':stock_radius,'dat_node_box_padding':1.,'dat_collision_detection_interval':0,
        'dat_inertial_predictor':True,'k_sdf':0.,'eps_sdf':.002,'rigid_pin_time':0.,'verbose':False,'write_substeps':False}
@@ -232,7 +238,11 @@ def run(arguments, *, enable_collision_pipeline=True):
         sys.argv = original_arguments
 
 
-def run_own(arguments, *, enable_planar_dat=True):
+def run_own(arguments, *, enable_planar_dat=True, enable_broad_phase_boxes=False,
+            enable_barrier_coloring=False, enable_color_ccd=False,
+            enable_color_ccd_contact_forces=False,color_ccd_method="direct_rounding",
+            vertex_contact_capacity=None, edge_contact_capacity=None,
+            level_based_ccd_guess=False,colored_ccd_guess_iters=1,colored_ccd_guess_fraction=1.,ccd_method=None):
     from .solver_dat import SolverDAT
     import newton.solvers
 
@@ -240,8 +250,24 @@ def run_own(arguments, *, enable_planar_dat=True):
     solvers = []
 
     def energy_solver(model, **stock_options):
-        attach_stock_ipc(model, gs_predictor="none")
-        solver = SolverDAT(model, enable_planar_dat=enable_planar_dat, **stock_options)
+        if level_based_ccd_guess:
+            attach_stock_ipc(model,gs_predictor="level",colored_ccd_guess_iters=colored_ccd_guess_iters,
+                             colored_ccd_guess_fraction=colored_ccd_guess_fraction)
+        else:
+            attach_stock_ipc(model, gs_predictor="none")
+        if ccd_method is not None:
+            model.ipc.params["ccd_method"] = ccd_method
+        if vertex_contact_capacity is not None:
+            stock_options["particle_vertex_contact_buffer_size"] = vertex_contact_capacity
+        if edge_contact_capacity is not None:
+            stock_options["particle_edge_contact_buffer_size"] = edge_contact_capacity
+        solver = SolverDAT(model, enable_planar_dat=enable_planar_dat,
+                           enable_broad_phase_boxes=enable_broad_phase_boxes,
+                           enable_barrier_coloring=enable_barrier_coloring,
+                           enable_color_ccd=enable_color_ccd,
+                           **({"color_ccd_method": color_ccd_method} if color_ccd_method != "direct_rounding" else {}),
+                           **({"enable_color_ccd_contact_forces": True} if enable_color_ccd_contact_forces else {}),
+                           **stock_options)
         solvers.append(solver)
         return solver
 
@@ -251,6 +277,38 @@ def run_own(arguments, *, enable_planar_dat=True):
         if result:
             return result
         # Check our latched numerical errors outside the official timer.
+        for solver in solvers:
+            solver.check_status()
+            coloring = getattr(solver, "barrier_coloring", None) if enable_barrier_coloring else None
+            if coloring is not None:
+                print(json.dumps({"barrier_coloring_statistics": coloring.statistics()}), flush=True)
+        return 0
+    finally:
+        newton.solvers.SolverVBD = original_solver
+
+
+def run_gs(arguments, *, enable_collisions=True):
+    """Run the unchanged stock scene with our GS update and energy kernels."""
+    from .solver import SolverIPC
+    import newton.solvers
+
+    original_solver = newton.solvers.SolverVBD
+    solvers = []
+
+    def gs_solver(model, **stock_options):
+        attach_stock_ipc(model, gs_predictor="colored")
+        solver = SolverIPC(model, iterations=stock_options.get("iterations", ITERATIONS),
+            enable_collisions=enable_collisions,
+            vertex_contact_capacity=stock_options.get("particle_vertex_contact_buffer_size", 512),
+            edge_contact_capacity=stock_options.get("particle_edge_contact_buffer_size", 1024))
+        solvers.append(solver)
+        return solver
+
+    try:
+        newton.solvers.SolverVBD = gs_solver
+        result = run(arguments, enable_collision_pipeline=enable_collisions)
+        if result:
+            return result
         for solver in solvers:
             solver.check_status()
         return 0

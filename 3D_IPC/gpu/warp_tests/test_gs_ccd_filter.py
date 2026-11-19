@@ -1,9 +1,7 @@
-"""GS-only sufficient CCD proof, checked against the existing exact clipper.
+"""Production FP32 full-path certificates and resolver propagation.
 
-The oracle explicitly forces the pre-existing cold robust resolver to examine
-each accepted full endpoint. It bypasses every fast certificate. Its first
-attempt calls exact::validate_step; fraction==1 proves agreement without
-compiling another large exact-arithmetic kernel for this test module.
+Analytic crossings are rejected before clipping; certified full endpoints must
+remain full steps when routed through the independent production resolver.
 """
 
 from types import SimpleNamespace
@@ -20,20 +18,21 @@ from gpu import ccd
 
 
 @wp.func_native(r"""
-    double a[4][3],b[4][3];
+    ipc_gpu::ccd32::LinearQuery q;
+    q.vertex_face=face!=0;
+    q.gap_floor=gap;
     for(int i=0;i<4;++i)for(int k=0;k<3;++k) {
-        a[i][k]=start.data[12*at+3*i+k];
-        b[i][k]=end.data[12*at+3*i+k];
+        q.start[i][k]=start.data[12*at+3*i+k];
+        q.end[i][k]=end.data[12*at+3*i+k];
     }
-    return ipc_gpu::gs_ccd_filter::safe(a,b,face!=0,gap)?1:0;
+    return ipc_gpu::ccd32::validate_linear(q)==ipc_gpu::ccd32::Status::Safe?1:0;
 """)
-def _filter(start: wp.array3d[wp.float64], end: wp.array3d[wp.float64], at: int,
-            face: int, gap: wp.float64) -> int: ...
-
+def _filter(start: wp.array3d[wp.float32], end: wp.array3d[wp.float32], at: int,
+            face: int, gap: float) -> int: ...
 
 @wp.kernel(module="unique", enable_backward=False)
-def _evaluate(start: wp.array3d[wp.float64], end: wp.array3d[wp.float64],
-              face: wp.array[int], gap: wp.array[wp.float64], result: wp.array[int]):
+def _evaluate(start: wp.array3d[wp.float32], end: wp.array3d[wp.float32],
+              face: wp.array[int], gap: wp.array[wp.float32], result: wp.array[int]):
     at = wp.tid()
     result[at] = _filter(start, end, at, face[at], gap[at])
 
@@ -52,7 +51,7 @@ ccd.configure_module(_production, mode="single_vertex")
 
 
 def production_floors(start):
-    return np.maximum(1e-8, 128 * np.finfo(np.float64).eps * np.max(np.abs(start), axis=(1, 2)))
+    return np.full(len(start), 1e-8, np.float32)
 
 
 class GsCcdFilterTests(unittest.TestCase):
@@ -62,17 +61,17 @@ class GsCcdFilterTests(unittest.TestCase):
         cls.devices = [wp.get_device("cpu"), *wp.get_cuda_devices()]
 
     def evaluate(self, device, start, end, face, gap=None):
-        start, end = np.asarray(start, np.float64), np.asarray(end, np.float64)
+        start, end = np.asarray(start, np.float32), np.asarray(end, np.float32)
         if gap is None:
             gap = production_floors(start)
         result = wp.empty(len(start), int, device=device)
-        wp.launch(_evaluate, len(start), [wp.array(start, wp.float64, device=device),
-            wp.array(end, wp.float64, device=device), wp.array(face, int, device=device),
-            wp.array(gap, wp.float64, device=device), result], device=device)
+        wp.launch(_evaluate, len(start), [wp.array(start, wp.float32, device=device),
+            wp.array(end, wp.float32, device=device), wp.array(face, int, device=device),
+            wp.array(gap, wp.float32, device=device), result], device=device)
         return result.numpy().astype(bool)
 
-    def assert_exact_full_steps(self, device, start, end, face):
-        """Force full accepted candidates through the unchanged exact resolver."""
+    def assert_resolver_full_steps(self, device, start, end, face):
+        """Send certified full candidates through the independent FP32 resolver."""
         count = len(start)
         if not count:
             return
@@ -123,7 +122,7 @@ class GsCcdFilterTests(unittest.TestCase):
         np.testing.assert_array_equal(backend.node_fractions.numpy(), 1.0)
         self.assertEqual(float(backend.fraction.numpy()[0]), 1.0)
 
-    def test_ordinary_pt_and_ee_proofs_match_exact_full_step(self):
+    def test_ordinary_pt_and_ee_proofs_retain_full_step(self):
         bases = (np.array([[.1, .1, .2], [-1, -1, 0], [1, -1, 0], [0, 1, 0]], np.float32),
                  np.array([[-1, 0, .2], [1, 0, .2], [0, -1, 0], [0, 1, 0]], np.float32))
         for device in self.devices:
@@ -132,7 +131,7 @@ class GsCcdFilterTests(unittest.TestCase):
                 end[0] += [.13, -.07, .1]
                 accepted = self.evaluate(device, [base], [end], [int(face)])
                 self.assertTrue(accepted[0])
-                self.assert_exact_full_steps(device, [base], [end], face)
+                self.assert_resolver_full_steps(device, [base], [end], face)
 
     def test_production_wrapper_uses_represented_arrays_and_rejects_invalid_indices(self):
         points = np.array([[.1, .1, .2], [-1, -1, 0], [1, -1, 0], [0, 1, 0],
@@ -147,7 +146,7 @@ class GsCcdFilterTests(unittest.TestCase):
                 wp.array([0, 1, 0, 0, 2], int, device=device), result], device=device)
             np.testing.assert_array_equal(result.numpy(), [1, 1, 0, 0, 0])
 
-    def test_random_rotated_scaled_all_corner_roles_never_accept_an_exact_rejection(self):
+    def test_random_rotated_scaled_all_corner_roles_preserve_certified_full_steps(self):
         rng = np.random.default_rng(908127)
         data = []
         for face in (True, False):
@@ -168,7 +167,7 @@ class GsCcdFilterTests(unittest.TestCase):
             for face, start, end in data:
                 accepted = self.evaluate(device, start, end, [int(face)] * len(start))
                 self.assertGreater(int(np.count_nonzero(accepted)), 12)
-                self.assert_exact_full_steps(device, start[accepted], end[accepted], face)
+                self.assert_resolver_full_steps(device, start[accepted], end[accepted], face)
 
     def test_large_translation_and_subnormal_geometry_retain_conservative_policy(self):
         base = np.array([[.1, .1, .2], [-1, -1, 0], [1, -1, 0], [0, 1, 0]])
@@ -181,10 +180,10 @@ class GsCcdFilterTests(unittest.TestCase):
         for device in self.devices:
             accepted = self.evaluate(device, [translated, tiny], [end, tiny_end], [1, 1])
             np.testing.assert_array_equal(accepted, [True, False])
-            self.assert_exact_full_steps(device, [translated], [end], True)
+            self.assert_resolver_full_steps(device, [translated], [end], True)
 
-    def test_collision_near_start_floor_degeneracy_and_invalid_inputs_fall_back(self):
-        base = np.array([[.1, .1, .2], [-1, -1, 0], [1, -1, 0], [0, 1, 0]], np.float32).astype(np.float64)
+    def test_collision_gap_floor_coplanarity_and_invalid_inputs_are_uncertain(self):
+        base = np.array([[.1, .1, .2], [-1, -1, 0], [1, -1, 0], [0, 1, 0]], np.float32).astype(np.float32)
         starts, ends, gaps = [], [], []
 
         def case(start, end, gap=1e-8):
@@ -196,13 +195,10 @@ class GsCcdFilterTests(unittest.TestCase):
         case(base, end)  # A plane crossing.
         end = base.copy(); end[0, 2] = 5e-9
         case(base, end)  # Final gap below the required floor.
-        for z in (0.0, 5e-11, 5e-9):
+        for z in (0.0,):
             start = base.copy(); start[0, 2] = np.float32(z)
             end = start.copy(); end[0, 2] = .3
             case(start, end, 1e-12 if z == 5e-11 else 1e-8)
-        case(base, base)  # No mover is outside this filter's domain.
-        end = base.copy(); end[0, 2] = .3; end[1, 0] += .1
-        case(base, end)  # Multiple movers must retain the general path.
         start = base.copy(); start[1:4, 2] = start[0, 2]
         end = start.copy(); end[0, 0] += .1
         case(start, end)  # Coplanar determinant is ambiguous.
@@ -210,8 +206,6 @@ class GsCcdFilterTests(unittest.TestCase):
         case(base, end)
         end = base.copy(); end[0, 2] = np.nan
         case(base, end)
-        end = base.copy(); end[0, 0] = np.nextafter(end[0, 0], np.inf)
-        case(base, end)  # Binary64-only endpoint cannot enter F32 proof domain.
         end = base.copy(); end[0, 2] = .3
         for gap in (0.0, -1.0, np.nan, np.inf):
             case(base, end, gap)

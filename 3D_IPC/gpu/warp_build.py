@@ -50,6 +50,7 @@ float hypotf(float,float); float copysignf(float,float);
 float fmaxf(float,float); float fminf(float,float);
 float sqrtf(float); float fabsf(float); float fmaf(float,float,float);
 float atan2f(float,float); float powf(float,float); float sinf(float); float cosf(float);
+float nextafterf(float,float);
 }
 #endif
 namespace std {

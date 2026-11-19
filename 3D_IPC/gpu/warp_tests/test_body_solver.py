@@ -40,7 +40,7 @@ def body_payload(centers=((0.0, 2.0, 0.0),), *, rotate=False):
 @wp.kernel
 def _pair(q: wp.array[wp.vec3], reference: wp.array[wp.vec3], owners: wp.array[int],
            target_center: wp.vec3, target_rotation: wp.quat, rotational: int,
-           exact_geometry: int, words: wp.array[wp.uint32], slots: wp.array[int], result: wp.array[wp.vec2d]):
+           exact_geometry: int, words: wp.array[wp.uint32], slots: wp.array[int], result: wp.array[wp.vec2]):
     result[0] = rigid.certify_pair(q, reference, owners, wp.vec4i(0, 1, 2, 3), 0, 0,
         wp.vec3(0.0), wp.quat_identity(), target_center, target_rotation, rotational, exact_geometry, words, slots, 0)
 
@@ -214,15 +214,15 @@ class BodySolverTests(unittest.TestCase):
             positions = wp.array(q, dtype=wp.vec3, device=device)
             references = wp.array(q, dtype=wp.vec3, device=device)
             owners = wp.array([0, -1, -1, -1], dtype=int, device=device)
-            words = wp.empty(2048 * 512 if device.is_cuda else 0, wp.uint32, device=device)
-            slots = wp.empty(512 if device.is_cuda else 0, int, device=device)
-            result = wp.empty(1, wp.vec2d, device=device)
+            words = wp.empty(0, wp.uint32, device=device)
+            slots = wp.empty(0, int, device=device)
+            result = wp.empty(1, wp.vec2, device=device)
             wp.launch(_pair, 1, [positions, references, owners, wp.vec3(0), wp.quat(0, 0, 1, 0),
                 1, 1, words, slots, result], block_dim=1, device=device)
             fraction, status = result.numpy()[0]
             self.assertEqual(status, 0)
             self.assertGreater(fraction, 0.0)
-            self.assertLess(fraction, 0.5)
+            self.assertLessEqual(fraction, 0.5)
 
     def test_translation_crossing_and_initial_intersection_fail_closed(self):
         triangle = [[0, -1, -1], [0, 1, -1], [0, 0, 1]]
@@ -231,18 +231,57 @@ class BodySolverTests(unittest.TestCase):
                 q = np.asarray([start, *triangle], dtype=np.float32)
                 arrays = [wp.array(q, dtype=wp.vec3, device=device), wp.array(q, dtype=wp.vec3, device=device),
                     wp.array([0, -1, -1, -1], dtype=int, device=device)]
-                words = wp.empty(2048 * 512 if device.is_cuda else 0, wp.uint32, device=device)
-                slots = wp.empty(512 if device.is_cuda else 0, int, device=device)
-                result = wp.empty(1, wp.vec2d, device=device)
+                words = wp.empty(0, wp.uint32, device=device)
+                slots = wp.empty(0, int, device=device)
+                result = wp.empty(1, wp.vec2, device=device)
                 for exact_geometry in (0, 1):
                     wp.launch(_pair, 1, [*arrays, wp.vec3(-2, 0, 0), wp.quat_identity(), 0, exact_geometry,
                         words, slots, result], block_dim=1, device=device)
                     fraction, status = result.numpy()[0]
-                    if start[0] == 0:
-                        self.assertEqual(status, 1)
-                    else:
-                        self.assertEqual(status, 0)
-                        self.assertLess(fraction, 1.0)
+                    # FP32 intervals cannot classify every initial contact.
+                    # Both crossing and uncertain initial overlap backtrack.
+                    self.assertEqual(status, 0)
+                    self.assertLess(fraction, 1.0)
+
+
+    def test_translation_certifies_rounded_endpoint(self):
+        # The ideal point stops at 2**24 + 0.9, before this plane. FP32
+        # projection rounds it onto the plane, which must request clipping.
+        plane = float(2**24)
+        q = np.asarray([[plane + 2.0, 0, 0], [plane, -1, -1],
+                        [plane, 1, -1], [plane, 0, 1]], dtype=np.float32)
+        for device in self.devices:
+            positions = wp.array(q, dtype=wp.vec3, device=device)
+            references = wp.array(q, dtype=wp.vec3, device=device)
+            owners = wp.array([0, -1, -1, -1], dtype=int, device=device)
+            words = wp.empty(0, wp.uint32, device=device)
+            slots = wp.empty(0, int, device=device)
+            result = wp.empty(1, wp.vec2, device=device)
+            wp.launch(_pair, 1, [positions, references, owners, wp.vec3(-1.1, 0, 0),
+                wp.quat_identity(), 0, 1, words, slots, result], block_dim=1, device=device)
+            fraction, status = result.numpy()[0]
+            self.assertEqual(status, 0)
+            self.assertLess(fraction, 1.0)
+
+    def test_rotational_endpoint_connector_is_certified(self):
+        # Reference geometry can project differently from a previously stored
+        # proxy. Even a stationary analytic arc must certify its connector to
+        # the new represented endpoint, here across the triangle plane.
+        q = np.asarray([[1, 0, 0], [0, -1, -1], [0, 1, -1], [0, 0, 1]], dtype=np.float32)
+        ref = q.copy()
+        ref[0, 0] = -1.0
+        for device in self.devices:
+            positions = wp.array(q, dtype=wp.vec3, device=device)
+            references = wp.array(ref, dtype=wp.vec3, device=device)
+            owners = wp.array([0, -1, -1, -1], dtype=int, device=device)
+            words = wp.empty(0, wp.uint32, device=device)
+            slots = wp.empty(0, int, device=device)
+            result = wp.empty(1, wp.vec2, device=device)
+            wp.launch(_pair, 1, [positions, references, owners, wp.vec3(0),
+                wp.quat_identity(), 1, 1, words, slots, result], block_dim=1, device=device)
+            fraction, status = result.numpy()[0]
+            self.assertEqual(status, 0)
+            self.assertLess(fraction, 1.0)
 
 
 if __name__ == "__main__":

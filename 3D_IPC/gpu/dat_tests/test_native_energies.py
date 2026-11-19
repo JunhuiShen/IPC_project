@@ -278,7 +278,7 @@ class NativeContactTests(unittest.TestCase):
                             self.assertGreater(float(actual[0][0, 2]), 0.)
 
 
-# Corotated membrane forces and native local matrices.
+# Project corotated membrane forces and analytic self-Hessians.
 
 
 @wp.kernel(module="unique", enable_backward=False)
@@ -297,7 +297,7 @@ def membrane_probe(
         999.0, 999.0, 123.0, .1, materials)
     force[i] = f
     hessian[i] = h
-    packet = energy.triangle(
+    packet = energy.triangle_reference(
         positions[triangles[face, 0]], positions[triangles[face, 1]],
         positions[triangles[face, 2]], inverses[face], areas[face],
         materials[face, 0], materials[face, 1], role)
@@ -319,41 +319,6 @@ def scalar_energy(x, inverse, area, mu, lam):
     u, singular, vt = np.linalg.svd(f, full_matrices=False)
     rotation = u @ vt
     return area * (mu * np.sum((f - rotation)**2) + .5 * lam * (np.prod(singular) - 1)**2)
-
-
-def native_psd_hessians(x, inverse, area, mu, lam):
-    """Independent binary64 expression for Newton's projected local matrix."""
-    f0, f1 = (np.column_stack((x[1] - x[0], x[2] - x[0])) @ inverse).T
-    normal = np.cross(f0, f1)
-    jacobian = np.linalg.norm(normal)
-    normal /= jacobian
-    g0, g1 = np.cross(f1, normal), np.cross(normal, f0)
-    lam_nh = lam + mu
-    stress = lam_nh * (jacobian - 1 - mu / lam_nh)
-    r = max(0., stress) / jacobian
-    matrices = []
-    for alpha, beta in np.vstack((-inverse.sum(axis=0), inverse)):
-        area_gradient = alpha * g0 + beta * g1
-        direction = alpha * f1 - beta * f0
-        identity_scale = mu * (alpha**2 + beta**2) + r * np.dot(direction, direction)
-        matrices.append(area * (identity_scale * np.eye(3)
-            + (lam_nh - r) * np.outer(area_gradient, area_gradient)
-            - r * np.outer(direction, direction)))
-    return np.asarray(matrices)
-
-
-def native_clamped_corotated_force(x, inverse, area, mu, lam):
-    """Independent force expression with the explicitly adopted native floor."""
-    f = np.column_stack((x[1] - x[0], x[2] - x[0])) @ inverse
-    area_vector = np.cross(f[:, 0], f[:, 1])
-    jacobian = np.sqrt(max(np.dot(area_vector, area_vector), 1.e-20))
-    normal = area_vector / jacobian
-    cofactors = np.column_stack((np.cross(f[:, 1], normal), np.cross(normal, f[:, 0])))
-    stretch_trace = np.sqrt(np.sum(f**2) + 2 * jacobian)
-    rotation = (f + cofactors) / stretch_trace
-    stress = 2 * mu * (f - rotation) + lam * (jacobian - 1) * cofactors
-    shapes = np.vstack((-inverse.sum(axis=0), inverse))
-    return -area * (stress @ shapes.T).T
 
 
 def finite_difference_derivatives(x, inverse, area, mu, lam):
@@ -404,7 +369,7 @@ class NativeMembraneTests(unittest.TestCase):
             device=device)
         return [item.numpy().reshape((count, 3) + item.numpy().shape[1:]) for item in outputs]
 
-    def test_clone_changes_only_the_two_constitutive_stresses(self):
+    def test_legacy_clone_changes_only_the_two_constitutive_stresses(self):
         source, proof = energies.membrane_source()
         self.assertTrue(proof['restored_byte_identical'])
         self.assertTrue(proof['geometry_unchanged'])
@@ -417,7 +382,7 @@ class NativeMembraneTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Pinned native DAT membrane'):
                 energies.membrane_source()
 
-    def test_regular_force_preserves_original_energy_and_hessian_reuses_native_psd_matrix(self):
+    def test_regular_derivatives_match_project_binary64_reference(self):
         rng = np.random.default_rng(9281)
         positions, inverses = [], []
         for _ in range(64):
@@ -428,18 +393,18 @@ class NativeMembraneTests(unittest.TestCase):
             inverses.append([[1.1, -.2], [.05, .9]])
         for device in self.devices:
             with self.subTest(device=str(device)):
-                f, h, old_f, old_h, native_h = self.evaluate(device, positions, inverses, [.48] * 64, [[17.3, 23.1]] * 64)
+                f, h, reference_f, reference_h, native_h = self.evaluate(
+                    device, positions, inverses, [.48] * 64, [[17.3, 23.1]] * 64)
                 self.assertTrue(np.isfinite(f).all() and np.isfinite(h).all())
-                np.testing.assert_allclose(f, old_f, rtol=5.e-4, atol=3.e-4)
-                np.testing.assert_array_equal(h, native_h)
-                independent_h = np.asarray([native_psd_hessians(
-                    np.asarray(x, np.float64), np.asarray(dm, np.float64), .48, 17.3, 23.1)
-                    for x, dm in zip(positions, inverses)])
-                np.testing.assert_allclose(h, independent_h, rtol=5.e-4, atol=5.e-4)
-                np.testing.assert_allclose(h, h.transpose(0, 1, 3, 2), rtol=0, atol=2.e-5)
-                self.assertGreaterEqual(np.linalg.eigvalsh(h).min(), -1.e-4)
+                np.testing.assert_allclose(f, reference_f, rtol=5.e-4, atol=3.e-4)
+                np.testing.assert_allclose(h, reference_h, rtol=5.e-4, atol=5.e-4)
+                np.testing.assert_allclose(h, h.transpose(0, 1, 3, 2), rtol=0, atol=5.e-5)
+                # Compression can give negative curvature; retaining it is
+                # intentional, matching the project's unprojected Hessian.
+                self.assertLess(float(np.linalg.eigvalsh(h).min()), -.1)
+                self.assertGreater(float(np.max(np.abs(h - native_h))), .5)
 
-    def test_force_independently_differentiates_own_scalar_energy_with_approximate_hessian(self):
+    def test_force_and_hessian_independently_differentiate_own_scalar_energy(self):
         positions = np.asarray([
             [[.1, -.2, .3], [1.2, .1, .25], [.2, 1.1, .55]],
             [[0, 0, 0], [.45, .1, -.15], [-.1, .6, .2]],
@@ -454,24 +419,45 @@ class NativeMembraneTests(unittest.TestCase):
             with self.subTest(device=str(device)):
                 f, h, _, _, native_h = self.evaluate(device, positions, [inverse] * 3, [.48] * 3, [[17.3, 23.1]] * 3)
                 np.testing.assert_allclose(f, expected_f, rtol=5.e-4, atol=3.e-4)
-                np.testing.assert_array_equal(h, native_h)
-                self.assertGreater(float(np.max(np.abs(h - expected_h))), .5)
+                np.testing.assert_allclose(h, expected_h, rtol=5.e-4, atol=5.e-4)
+                self.assertGreater(float(np.max(np.abs(h - native_h))), .5)
 
-    def test_rank_loss_adopts_finite_native_floor_and_native_hessian(self):
+    def test_rank_loss_keeps_project_regularization_and_nonfinite_behavior(self):
         positions = [
             [[0, 0, 0], [1.e-7, 0, 0], [0, 1, 0]],
-            [[0, 0, 0], [1, 0, 0], [1, 1.e-5, 0]],
+            [[0, 0, 0], [1, 0, 0], [2, 0, 0]],
             [[0, 0, 0], [0, 0, 0], [0, 1, 0]],
         ]
-        expected_f = np.asarray([native_clamped_corotated_force(
-            np.asarray(x, np.float64), np.eye(2), .5, 3., 5.) for x in positions])
         for device in self.devices:
             with self.subTest(device=str(device)):
-                f, h, _, _, native_h = self.evaluate(device, positions, [np.eye(2)] * 3, [.5] * 3, [[3., 5.]] * 3)
+                f, h, reference_f, reference_h, _ = self.evaluate(
+                    device, positions, [np.eye(2)] * 3, [.5] * 3, [[3., 5.]] * 3)
+                # The polar eigenvalue floor does not regularize C inverse.
+                # Exactly rank-deficient triangles keep the project's NaNs;
+                # substituting the native finite floor would change the model.
+                np.testing.assert_array_equal(np.isfinite(f), np.isfinite(reference_f))
+                np.testing.assert_array_equal(np.isfinite(h), np.isfinite(reference_h))
+                np.testing.assert_allclose(f[0], reference_f[0], rtol=5.e-4, atol=3.e-4)
+                np.testing.assert_allclose(h[0], reference_h[0], rtol=5.e-4, atol=5.e-4)
+                self.assertFalse(np.isfinite(f[1:]).all())
+                self.assertFalse(np.isfinite(h[1:]).all())
+
+    def test_skinny_membrane_derivatives_remain_scale_invariant(self):
+        # Keep the deformation gradient and dimensionless conditioning fixed
+        # while changing world length units. The rest area changes quadratically.
+        skinny = np.array([[0, 0, 0], [1.e-7, 0, 0], [0, 1, 0]], np.float32)
+        scales = (1.e-2, 1., 1.e2)
+        positions = [skinny * scale for scale in scales]
+        inverses = [np.eye(2) / scale for scale in scales]
+        areas = [.5 * scale**2 for scale in scales]
+        for device in self.devices:
+            with self.subTest(device=str(device)):
+                f, h, reference_f, reference_h, _ = self.evaluate(
+                    device, positions, inverses, areas, [[3., 5.]] * len(scales))
                 self.assertTrue(np.isfinite(f).all() and np.isfinite(h).all())
-                np.testing.assert_allclose(f, expected_f, rtol=4.e-5, atol=3.e-5)
-                np.testing.assert_array_equal(h, native_h)
-                self.assertGreaterEqual(np.linalg.eigvalsh(h).min(), -1.e-5)
+                np.testing.assert_allclose(f, reference_f, rtol=5.e-4, atol=3.e-4)
+                np.testing.assert_allclose(h, reference_h, rtol=5.e-4, atol=5.e-4)
+                np.testing.assert_allclose(h, h.transpose(0, 1, 3, 2), rtol=5.e-6, atol=5.e-4)
 
     def test_zero_materials_have_zero_force_and_matrix_including_rank_loss(self):
         positions = [
@@ -498,7 +484,7 @@ def bending(q: wp.array[wp.vec3], previous: wp.array[wp.vec3], edges: wp.array2d
         own_role = role+2
         if role >= 2:
             own_role = role-2
-        old[role] = energy.hinge(q[edges[0,2]], q[edges[0,3]], q[edges[0,0]], q[edges[0,1]],
+        old[role] = energy.hinge_reference(q[edges[0,2]], q[edges[0,3]], q[edges[0,0]], q[edges[0,1]],
                                  coefficients[0], rest[0], stiffness[0], own_role)
     f, h = energies.evaluate_own_bending_force_hessian(
         0, role, q, previous, edges, rest, lengths, 99.0, 12.0, .01, coefficients, stiffness)
@@ -552,7 +538,7 @@ class NativeReuseTests(unittest.TestCase):
         cls.devices = [wp.get_device("cpu"), *wp.get_cuda_devices()]
 
     def bend_case(self, points, *, length=1.1, coefficient=2.75, stiffness=1.75,
-                  edge=(2, 3, 0, 1), native_expected=False):
+                  edge=(2, 3, 0, 1), compare_native=False):
         for device in self.devices:
             with self.subTest(device=str(device)):
                 q = wp.array(np.asarray(points, np.float32), wp.vec3, device=device)
@@ -565,43 +551,46 @@ class NativeReuseTests(unittest.TestCase):
                     scalar(length), scalar(coefficient), scalar(stiffness), old, f, h], device=device)
                 expected = old.numpy()
                 expected_f, expected_h = expected[:, :3], expected[:, 3:].reshape(4, 3, 3)
-                if native_expected:
-                    # The native guard now owns thin/tiny/degenerate geometry.
-                    # Compare its actual callback, rather than the removed own
-                    # fallback, using the same stiffness conversion and no damping.
+                if compare_native:
+                    # Regular geometry also matches the native angle energy
+                    # after its stiffness conversion; degeneracy guards differ.
                     nf = wp.zeros(4, wp.vec3, device=device)
                     nh = wp.zeros(4, wp.mat33, device=device)
                     wp.launch(native_bending, 4,
                         [q, previous, wp.array([edge], int, device=device), scalar(-.17),
                          scalar(length), scalar(coefficient), scalar(stiffness), nf, nh], device=device)
-                    expected_f, expected_h = nf.numpy(), nh.numpy()
+                    np.testing.assert_allclose(expected_f, nf.numpy(), rtol=6e-4, atol=5e-5)
+                    np.testing.assert_allclose(expected_h, nh.numpy(), rtol=8e-4, atol=5e-5)
                 np.testing.assert_allclose(f.numpy(), expected_f, rtol=6e-4, atol=5e-5)
                 np.testing.assert_allclose(h.numpy(), expected_h, rtol=8e-4, atol=5e-5)
                 self.assertTrue(np.isfinite(f.numpy()).all() and np.isfinite(h.numpy()).all())
-                if native_expected:
-                    np.testing.assert_array_equal(f.numpy(), expected_f)
-                    np.testing.assert_array_equal(h.numpy(), expected_h)
 
     def test_bending_all_roles_keeps_own_energy_and_zero_damping(self):
         self.bend_case([[0,0,0], [1.1,.1,.1], [.2,.8,.25], [.3,-.9,-.2]])
 
     def test_regular_bending_equals_actual_native_callback(self):
-        self.bend_case([[0,0,0], [1.1,.1,.1], [.2,.8,.25], [.3,-.9,-.2]], native_expected=True)
+        self.bend_case([[0,0,0], [1.1,.1,.1], [.2,.8,.25], [.3,-.9,-.2]], compare_native=True)
 
-    def test_bending_native_guard_band_uses_actual_native_skip_behavior(self):
-        self.bend_case([[0,0,0], [1,0,0], [.3,.005,.001], [.7,-.006,.002]], native_expected=True)
-        self.bend_case([[0,0,0], [5e-7,0,0], [0,1,.2], [0,-1,.1]], native_expected=True)
+    def test_thin_bending_keeps_project_geometry_instead_of_native_skip(self):
+        self.bend_case([[0,0,0], [1,0,0], [.3,.005,.001], [.7,-.006,.002]])
+        self.bend_case([[0,0,0], [5e-7,0,0], [0,1,.2], [0,-1,.1]])
 
-    def test_bending_invalid_or_unrepresentable_stiffness_mapping_is_zero(self):
+    def test_short_hinge_conditioning_is_relative_to_geometry_scale(self):
+        skinny = np.array([[0,0,0], [5e-7,0,0], [0,1,.2], [0,-1,.1]], np.float32)
+        for scale in (1.e-2, 1., 1.e2):
+            with self.subTest(world_scale=scale):
+                self.bend_case(skinny * scale, length=5.e-7 * scale)
+
+    def test_bending_uses_project_coefficient_without_native_rest_length_mapping(self):
         points = [[0,0,0], [1.1,.1,.1], [.2,.8,.25], [.3,-.9,-.2]]
         for length in (0., -1., float("inf"), float("nan"), 1e-40):
-            self.bend_case(points, length=length, native_expected=True)
-        self.bend_case(points, length=1e5, coefficient=.5, stiffness=1e-40, native_expected=True)
+            self.bend_case(points, length=length)
+        self.bend_case(points, length=1e5, coefficient=.5, stiffness=1e-6)
 
     def test_boundary_and_collapsed_bending_stays_zero(self):
         points = [[0,0,0], [1,0,0], [0,1,0], [0,-1,0]]
         self.bend_case(points, edge=(-1,3,0,1))
-        self.bend_case([[0,0,0], [0,0,0], [0,1,0], [0,-1,0]], native_expected=True)
+        self.bend_case([[0,0,0], [0,0,0], [0,1,0], [0,-1,0]])
 
 
     def test_native_contact_in_actual_rows_and_captured_dispatch(self):

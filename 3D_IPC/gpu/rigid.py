@@ -3,7 +3,8 @@
 Public quaternions use Newton/Warp's xyzw convention. Native derivatives use
 normalized scalar-first quaternions, with float32 state boundaries and the
 maintained binary64 signed-curvature/LDLT routines. Ordinary graph kernels
-remain in separate Warp modules from the cold block-size-one exact phase.
+remain in separate Warp modules from the block-size-one rigid solve. Rigid
+CCD and its rounded endpoint checks use FP32 throughout.
 """
 
 from __future__ import annotations
@@ -18,12 +19,12 @@ from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
 from . import contact, sdf
 from .contact import FullPacket, decode_candidate
 from .gs_contact_energies import make_full_evaluator
-from .ccd import round_inside
+from .ccd import round_inside, interpolate_positions
 from .warp_build import configure_module as _configure
 
 
-HEADERS=("rigid.cuh",)
-BODY_HEADERS=("rigid.cuh", "original_rigid.cuh")
+HEADERS=("rigid.cuh", "rigid_ccd_fp32.cuh")
+BODY_HEADERS=HEADERS
 
 _dat_contact_full = make_full_evaluator()
 _dat_contact_full64 = make_full_evaluator("float64")
@@ -454,7 +455,7 @@ class BodyData:
     damping: float
     gravity_y: float
     kpin: float
-    radius: wp.float64
+    radius: float
     angle: float
     use_ccd: int
     use_sdf: int
@@ -504,13 +505,26 @@ def _rotation_target(previous_q: wp.quat, current_q: wp.quat, anchor_q: wp.quat,
 
 
 @wp.func_native(r"""
-    wp::vec_t<4,float> out;double a[4],b[4],q[4];
-    const bool okay=ipc_warp_rigid::unit(current[0],current[1],current[2],current[3],a)
-        &&ipc_warp_rigid::unit(target[0],target[1],target[2],target[3],b)
-        &&ipc_gpu::solver::interpolate_rigid_orientation(a,b,fraction,q)==ipc_gpu::solver::RigidRotationStatus::Success;
-    for(int k=0;k<4;++k)out[k]=okay?static_cast<float>(q[(k+1)%4]):static_cast<float>(NAN);return out;
+    wp::vec_t<4,float> out;
+    float a[4],b[4],q[4];
+    for(int k=0;k<4;++k){a[k]=current[(k+3)%4];b[k]=target[(k+3)%4];}
+    const bool okay=ipc_gpu::rigid_ccd32::interpolate(a,b,fraction,q);
+    for(int k=0;k<4;++k)out[k]=okay?q[(k+1)%4]:NAN;
+    return out;
 """)
-def _interpolate(current: wp.quat, target: wp.quat, fraction: wp.float64) -> wp.vec4: ...
+def _interpolate(current: wp.quat, target: wp.quat, fraction: float) -> wp.vec4: ...
+
+
+@wp.func_native(r"""
+    wp::vec_t<3,float> out;
+    float x[3],center[3],q[4],point[3];
+    for(int k=0;k<3;++k){x[k]=reference[k];center[k]=com[k];}
+    for(int k=0;k<4;++k)q[k]=rotation[(k+3)%4];
+    const bool okay=ipc_gpu::rigid_ccd32::world_point(x,center,q,point);
+    for(int k=0;k<3;++k)out[k]=okay?point[k]:NAN;
+    return out;
+""")
+def _ccd_world_point(reference: wp.vec3, com: wp.vec3, rotation: wp.quat) -> wp.vec3: ...
 
 
 @wp.func_native(r"""
@@ -523,113 +537,52 @@ def _interpolate(current: wp.quat, target: wp.quat, fraction: wp.float64) -> wp.
 def _angular_velocity(previous: wp.quat, current: wp.quat, dt: float) -> wp.vec3: ...
 
 
-# Each call owns a complete cold-worker pool. The caller supplies one unique
-# worker index and launches with block_dim=1, as the contact exact queue does.
+# CCD has no exact worker pool. Scratch arguments remain ABI-compatible with
+# the surrounding contact system but are never read by this FP32 certificate.
+# A returned fraction below one requests another trial; it is not a certified
+# impact time. _accept always certifies that rounded trial again before commit.
 @wp.func_native(r"""
     using namespace ipc_gpu;
-    using namespace ipc_gpu::solver;
-    wp::vec_t<2,double> output;output[0]=1;output[1]=0;
-    double start[4][3],end[4][3],ideal[4][3],center[3],target_center[3],q[4],target_q[4];
-    bool okay=ipc_warp_rigid::unit(current_rotation[0],current_rotation[1],current_rotation[2],current_rotation[3],q)
-        &&ipc_warp_rigid::unit(target_rotation[0],target_rotation[1],target_rotation[2],target_rotation[3],target_q);
-    for(int k=0;k<3;++k){center[k]=current_com[k];target_center[k]=target_com[k];}
-    const bool face=kind==0,first=owners.data[nodes[0]]==body;
-    bool second=owners.data[nodes[face?1:2]]==body,moved=false;
-    for(int i=0;i<4;++i){const bool selected=owners.data[nodes[i]]==body;
-        okay=okay&&(selected==((i<(face?1:2))?first:second));
-        double ref[3],point[3];for(int k=0;k<3;++k)ref[k]=reference.data[nodes[i]][k];
-        if(selected)rigid_world_position(ref,target_center,target_q,point);
-        for(int k=0;k<3;++k){start[i][k]=positions.data[nodes[i]][k];
-            end[i][k]=selected?double(static_cast<float>(point[k])):start[i][k];
-            moved=moved||end[i][k]!=start[i][k];okay=okay&&isfinite(start[i][k])&&isfinite(end[i][k]);}}
-    if(!okay||first==second){output[1]=2;return output;}
-    if(!moved)return output;
-#if defined(__CUDA_ARCH__)
-    exact::DevicePool pool;exact::initialize_pool(pool,words.data+size_t(worker)*2048*512,
-        slots.data+size_t(worker)*512,2048,512);
-#endif
-    auto clean=[&](){
-#if defined(__CUDA_ARCH__)
-        return !pool.failed&&pool.available==pool.slot_count;
-#else
-        return true;
-#endif
-    };
-    auto represented=[&](const double a[4][3],const double b[4][3]){
-        auto result=original_rigid::represented_path<256>(a,b,face);
-        if(clean()&&result==original_rigid::RepresentationStatus::CapacityExceeded)
-            result=original_rigid::represented_path<2048>(a,b,face);
-        return result;
-    };
-    using R=original_rigid::RepresentationStatus;
-    auto publish=[&](R result){if(result==R::Uncertain)output[0]=fmin(output[0],0.5);
-        else if(result==R::InitialContact)output[1]=1;
-        else if(result==R::Invalid)output[1]=2;
-        else if(result==R::CapacityExceeded)output[1]=3;};
-    // A true initial intersection is an error even when the ORIGINAL TOI
-    // returns a zero fraction; do not turn it into a silent successful freeze.
-    publish(represented(start,start));
-    if(!rotational){
-        const double displacement[3]={target_center[0]-center[0],target_center[1]-center[1],target_center[2]-center[2]};
-        // Preserve our original relative-frame TOI, then independently prove
-        // the rounded multi-vertex endpoint path actually stored in Newton.
-        if(output[1]==0&&!exact_geometry&&original_rigid::translation_boxes_overlap(start,face,first,displacement)){
-            const auto query=original_rigid::translation_query(start,face,first,displacement);
-            auto hit=original_ccd::evaluate_fast(query);
-            if(hit.status==original_ccd::Status::NeedsExact){hit=original_ccd::evaluate_exact<256>(query);
-                if(clean()&&hit.status==original_ccd::Status::CapacityExceeded)hit=original_ccd::evaluate_exact<2048>(query);}
-            if(hit.status==original_ccd::Status::CapacityExceeded)output[1]=3;
-            else if(hit.status!=original_ccd::Status::Ok)output[1]=2;
-            else if(hit.collision)output[0]=fmin(output[0],0.9*hit.toi);
-        }
-        if(output[1]==0&&output[0]==1)publish(represented(start,end));
-    }else{
-        double relative[4],reverse[4];rotation_detail::relative(target_q,q,relative);
-        rotation_detail::relative(q,target_q,reverse);
-        okay=rotation_detail::normalize(relative,relative)&&rotation_detail::normalize(reverse,reverse);
-        if(!okay)output[1]=2;
-        if(output[1]==0){RigidRotationQuery query{};query.vertex_face=face;
-            for(int k=0;k<3;++k)query.com[k]=center[k];
-            for(int i=0;i<4;++i){query.current[i]=first?q[i]:(i==0?1:0);
-                query.target[i]=first?target_q[i]:reverse[i];
-                for(int k=0;k<3;++k)query.positions[i][k]=start[i][k];}
-            const auto result=rigid_rotation_ccd(query);
-            if(result.status!=RigidRotationStatus::Success)output[1]=2;
-            else if(result.collision)output[0]=fmin(output[0],0.9*result.time);
-            if(output[1]==0&&output[0]==1){
-                // The analytic arc starts at the represented float32 proxy.
-                // Fixed-reference projection may round its endpoint differently.
-                // Prove the short joining segment rather than assuming equality.
-                const double zero[3]={0,0,0};
-                for(int i=0;i<4;++i){if(owners.data[nodes[i]]==body){double offset[3],point[3];
-                        for(int k=0;k<3;++k)offset[k]=start[i][k]-center[k];
-                        rigid_world_position(offset,zero,relative,point);
-                        for(int k=0;k<3;++k)ideal[i][k]=point[k]+center[k];}
-                    else for(int k=0;k<3;++k)ideal[i][k]=start[i][k];}
-                publish(represented(ideal,end));
-            }
+    wp::vec_t<2,float> output;output[0]=1.0f;output[1]=0.0f;
+    if(kind!=0&&kind!=1){output[1]=2.0f;return output;}
+    ccd32::LinearQuery linear;
+    rigid_ccd32::Query rotation;
+    linear.vertex_face=rotation.vertex_face=kind==0;
+    linear.gap_floor=1.0e-8f;
+    float center[3],target_center[3],q[4],target_q[4];
+    for(int k=0;k<3;++k){center[k]=current_com[k];target_center[k]=target_com[k];rotation.center[k]=center[k];}
+    for(int k=0;k<4;++k){q[k]=current_rotation[(k+3)%4];target_q[k]=target_rotation[(k+3)%4];
+        rotation.current[k]=q[k];rotation.target[k]=target_q[k];}
+    if(rotational){for(int k=0;k<3;++k)if(center[k]!=target_center[k]){output[1]=2.0f;return output;}}
+    else{for(int k=0;k<4;++k)if(q[k]!=target_q[k]){output[1]=2.0f;return output;}}
+    for(int i=0;i<4;++i)if(nodes[i]<0||nodes[i]>=positions.shape[0]
+        ||nodes[i]>=owners.shape[0]||nodes[i]>=reference.shape[0]){output[1]=2.0f;return output;}
+    const bool first=owners.data[nodes[0]]==body;
+    const bool second=owners.data[nodes[linear.vertex_face?1:2]]==body;
+    if(first==second){output[1]=2.0f;return output;}
+    for(int i=0;i<4;++i){
+        const bool selected=owners.data[nodes[i]]==body;
+        if(selected!=((i<(linear.vertex_face?1:2))?first:second)){output[1]=2.0f;return output;}
+        rotation.selected[i]=selected;
+        float ref[3],point[3];
+        for(int k=0;k<3;++k)ref[k]=rotation.reference[i][k]=reference.data[nodes[i]][k];
+        if(selected&&!rigid_ccd32::world_point(ref,target_center,target_q,point)){output[1]=2.0f;return output;}
+        for(int k=0;k<3;++k){
+            linear.start[i][k]=rotation.start[i][k]=positions.data[nodes[i]][k];
+            linear.end[i][k]=rotation.end[i][k]=selected?point[k]:linear.start[i][k];
         }
     }
-    if(exact_geometry&&output[1]==0&&output[0]==1){
-        double scale=0;for(int i=0;i<4;++i)for(int k=0;k<3;++k)scale=fmax(scale,fmax(fabs(start[i][k]),fabs(end[i][k])));
-        const double gap=fmax(1e-8,128*DBL_EPSILON*scale);
-        auto verdict=exact::validate_endpoint_gap<256>(start,end,face,gap);
-        if(clean()&&verdict==exact::Status::CapacityExceeded)verdict=exact::validate_endpoint_gap<2048>(start,end,face,gap);
-        if(verdict==exact::Status::Unsafe)output[0]=0.5;
-        else if(verdict==exact::Status::InitialContact)output[1]=1;
-        else if(verdict==exact::Status::Invalid)output[1]=2;
-        else if(verdict==exact::Status::CapacityExceeded)output[1]=3;
-    }
-    if(!clean())output[1]=3;
-#if defined(__CUDA_ARCH__)
-    exact::release_pool();
-#endif
+    // Translation follows the represented segment. Rotation encloses every
+    // point on the quaternion arc, plus the rounded endpoint connectors.
+    const auto status=rotational?rigid_ccd32::validate_rotation(rotation):ccd32::validate_linear(linear);
+    if(status==ccd32::Status::Invalid)output[1]=2.0f;
+    else if(status!=ccd32::Status::Safe)output[0]=0.5f;
     return output;
 """)
 def certify_pair(positions: wp.array[wp.vec3], reference: wp.array[wp.vec3], owners: wp.array[int],
                  nodes: wp.vec4i, kind: int, body: int, current_com: wp.vec3, current_rotation: wp.quat,
                  target_com: wp.vec3, target_rotation: wp.quat, rotational: int, exact_geometry: int,
-                 words: wp.array[wp.uint32], slots: wp.array[int], worker: int) -> wp.vec2d: ...
+                 words: wp.array[wp.uint32], slots: wp.array[int], worker: int) -> wp.vec2: ...
 
 
 @wp.func
@@ -705,30 +658,34 @@ def _accept(data: BodyData, body: int, target: wp.transform, rotational: int, wo
     rotation = wp.transform_get_rotation(current)
     target_center = wp.transform_get_translation(target)
     target_rotation = wp.transform_get_rotation(target)
-    fraction = wp.float64(1.0)
+    fraction = float(1.0)
     done = bool(False)
     for attempt in range(65):
         if not done and data.error[0] == 0:
+            if attempt == 64:
+                fraction = 0.0
             trial_center = center
             trial_rotation = rotation
             if rotational != 0:
                 value = _interpolate(rotation, target_rotation, fraction)
                 trial_rotation = wp.quat(value[0], value[1], value[2], value[3])
             else:
-                for k in range(3):
-                    trial_center[k] = wp.float32(wp.float64(center[k]) + fraction *
-                        (wp.float64(target_center[k]) - wp.float64(center[k])))
+                trial_center = interpolate_positions(center, target_center, fraction)
             same = bool(True)
             for k in range(3):
+                if not wp.isfinite(trial_center[k]):
+                    wp.atomic_max(data.error, 0, 612)
                 same = same and trial_center[k] == center[k]
             for k in range(4):
+                if not wp.isfinite(trial_rotation[k]):
+                    wp.atomic_max(data.error, 0, 612)
                 same = same and trial_rotation[k] == rotation[k]
             # A zero proposal is a true no-op. Reprojection would introduce a
             # second, unrequested rounding move and change finite-pin states.
-            if same or fraction == wp.float64(0.0):
+            if same or fraction == float(0.0):
                 done = True
             else:
-                safe = wp.float64(1.0)
+                safe = float(1.0)
                 if data.use_ccd != 0:
                     for slot in range(data.offsets[body], data.offsets[body + 1]):
                         nodes, kind = contact.decode_candidate(data.candidates[data.incidence[slot]],
@@ -737,19 +694,19 @@ def _accept(data: BodyData, body: int, target: wp.transform, rotational: int, wo
                             center, rotation, trial_center, trial_rotation, rotational, data.exact_geometry,
                             data.words, data.slots, worker)
                         safe = wp.min(safe, result[0])
-                        if result[1] != wp.float64(0.0):
+                        if result[1] != float(0.0):
                             wp.atomic_max(data.error, 0, 610 + int(result[1]))
-                if safe == wp.float64(1.0) and data.error[0] == 0:
+                if safe == float(1.0) and data.error[0] == 0:
                     data.poses[body] = wp.transform(trial_center, trial_rotation)
                     if rotational != 0:
                         data.omega[body] = _angular_velocity(wp.transform_get_rotation(data.previous_pose[body]),
                             trial_rotation, data.dt)
                     for slot in range(data.node_offsets[body], data.node_offsets[body + 1]):
                         node = data.nodes[slot]
-                        data.q[node] = world_point(data.reference[node], trial_center, trial_rotation)
+                        data.q[node] = _ccd_world_point(data.reference[node], trial_center, trial_rotation)
                     done = True
                 else:
-                    fraction *= wp.max(wp.float64(0.0), safe)
+                    fraction *= wp.max(float(0.0), safe)
     if not done and data.error[0] == 0:
         wp.atomic_max(data.error, 0, 614)
 
@@ -903,7 +860,7 @@ class BodySolver:
 
 
 def configure_body_module(module=None):
-    """Attach the complete native preamble needed by the cold rigid phase."""
+    """Attach mechanical arithmetic and the FP32 rigid CCD certificate."""
     target = __name__ if module is None else module
     contact.configure_module(target, include_filter=False)
     configure_module(target)

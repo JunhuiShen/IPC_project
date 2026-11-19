@@ -57,6 +57,13 @@ def _positive(value):
     return result
 
 
+def _fraction(value):
+    result = float(value)
+    if not math.isfinite(result) or not 0.0 <= result <= 1.0:
+        raise argparse.ArgumentTypeError("Target fraction must be finite and in [0,1]")
+    return result
+
+
 def signature(payload, solver_mode="ipc"):
     immutable = {key: value for key, value in payload.items() if key != "output"}
     immutable["_gpu_solver"] = solver_mode
@@ -216,11 +223,19 @@ def run_simulation(exporter, model, solver, *, graphs=True, benchmark=False, ben
             print(json.dumps({"frame": frame, "substeps": substeps, "iterations": substeps * int(p["max_global_iters"]), "seconds": seconds}), flush=True)
     if test:
         output.snapshot(model, controller.state)
+    total_seconds = time.perf_counter() - started
+    coloring = getattr(solver, "barrier_coloring", None)
+    coloring_statistics = coloring.statistics() if coloring is not None else None
+    if coloring_statistics is not None and not benchmark:
+        metadata["barrier_coloring_statistics"] = coloring_statistics
+        output.write_json(directory / "newton_ipc_run.json", metadata)
     result = {"completed_frame": frames, "substeps": substeps, "iterations_per_substep": int(p["max_global_iters"]),
         "solver": solver_mode,
+        "solver_configuration": getattr(solver, "configuration", {}),
         "contact_capacities": getattr(solver, "contact_capacities", {}),
-        "total_seconds": time.perf_counter() - started, "timed_frames": len(measured), "graph_capture": bool(controller.graphs),
+        "total_seconds": total_seconds, "timed_frames": len(measured), "graph_capture": bool(controller.graphs),
         "capture_seconds": controller.capture_seconds,
+        "barrier_coloring_statistics": coloring_statistics,
         "snapshot_download_timed": bool(benchmark and benchmark_snapshot)}
     if measured:
         result["milliseconds_per_frame"] = 1000 * sum(measured) / len(measured)
@@ -236,13 +251,33 @@ def main(argv=None):
     parser.add_argument("--solver", choices=("ipc", "dat", "dat-reference"), default="ipc",
                         help="our GS/CCD, DAT with our energies, or exact upstream DAT")
     parser.add_argument("--stock-cloth-twist", action="store_true",
-                        help="for DAT, run the original 2,500-vertex cloth example with our energy terms")
+                        help="run the original 2,500-vertex cloth example with our GS or DAT solver")
     parser.add_argument("--no-planar-dat", action="store_true",
-                        help="for our-energy DAT, disable collision processing, contact energies and DAT motion limits")
-    parser.add_argument("--vertex-contact-capacity", type=_positive, default=128,
-                        help="persistent triangle-contact row capacity per mesh vertex")
-    parser.add_argument("--edge-contact-capacity", type=_positive, default=256,
-                        help="persistent edge-contact row capacity per mesh edge")
+                        help="for our-energy DAT, disable solver contact energies and DAT limits; explicit predictor/color CCD remains enabled; --color-ccd-contact-forces can restore mesh forces")
+    parser.add_argument("--level-based-ccd-guess", action="store_true",
+                        help="for --solver dat, replace the native predictor with our GPU level-based CCD initial guess")
+    parser.add_argument("--ccd-method", choices=("interval", "plane", "direct_rounding"),
+                        help="initial-guess CCD method; independent of --color-ccd-method")
+    parser.add_argument("--colored-ccd-guess-iters", type=_nonnegative,
+                        help="with --level-based-ccd-guess, updating sweep cap (default: 1, plus one discarded probe)")
+    parser.add_argument("--colored-ccd-guess-fraction", type=_fraction,
+                        help="with --level-based-ccd-guess, target displacement fraction (default: 1)")
+    parser.add_argument("--build-broad-phase-boxes", action="store_true",
+                        help="with --solver dat --no-planar-dat, build node/primitive boxes and BVHs")
+    parser.add_argument("--color-barrier-pairs", action="store_true",
+                        help="with --solver dat --no-planar-dat --build-broad-phase-boxes, color candidate pairs and use combined colors for VBD sweeps")
+    parser.add_argument("--color-ccd", action="store_true",
+                        help="with --solver dat --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs, clip actual VBD color updates with independent per-vertex FP32 CCD")
+    parser.add_argument("--color-ccd-method", choices=("direct_rounding", "plane"), default="direct_rounding",
+                        help="per-color CCD method, independent of --ccd-method (default: direct_rounding)")
+    parser.add_argument("--color-ccd-contact-forces", action="store_true",
+                        help="with --color-ccd, assemble IPC barrier and friction forces before each VBD color update")
+    parser.add_argument("--no-collisions", action="store_true",
+                        help="for deformable GS, disable collision processing, CCD and movement-box limits")
+    parser.add_argument("--vertex-contact-capacity", type=_positive,
+                        help="triangle-contact/candidate row capacity per vertex (native scenes: 128; stock scene: its original default)")
+    parser.add_argument("--edge-contact-capacity", type=_positive,
+                        help="edge-contact/candidate row capacity per edge (native scenes: 256; stock scene: its original default)")
     parser.add_argument("--scene-exporter", type=Path)
     parser.add_argument("--no-graphs", action="store_true")
     parser.add_argument("--benchmark", action="store_true", help="headless timing, without geometry/checkpoint output")
@@ -253,8 +288,35 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true")
     options, native = parser.parse_known_args(argv)
     try:
+        if options.level_based_ccd_guess and options.solver != "dat":
+            raise ValueError("--level-based-ccd-guess requires --solver dat")
+        if options.ccd_method is not None and not options.level_based_ccd_guess:
+            raise ValueError("--ccd-method requires --level-based-ccd-guess")
+        if not options.level_based_ccd_guess and (options.colored_ccd_guess_iters is not None or
+                                                 options.colored_ccd_guess_fraction is not None):
+            raise ValueError("--colored-ccd-guess-iters/fraction require --level-based-ccd-guess")
+        guess_options = ({"level_based_ccd_guess": True,
+                          "colored_ccd_guess_iters": 1 if options.colored_ccd_guess_iters is None else options.colored_ccd_guess_iters,
+                          "colored_ccd_guess_fraction": 1.0 if options.colored_ccd_guess_fraction is None else options.colored_ccd_guess_fraction}
+                         if options.level_based_ccd_guess else {})
+        if options.ccd_method is not None:
+            guess_options["ccd_method"] = options.ccd_method
         if options.no_planar_dat and options.solver != "dat":
             raise ValueError("--no-planar-dat requires --solver dat")
+        if options.build_broad_phase_boxes and (options.solver != "dat" or not options.no_planar_dat):
+            raise ValueError("--build-broad-phase-boxes requires --solver dat --no-planar-dat")
+        if options.color_barrier_pairs and (options.solver != "dat" or not options.no_planar_dat or
+                                            not options.build_broad_phase_boxes):
+            raise ValueError("--color-barrier-pairs requires --solver dat --no-planar-dat --build-broad-phase-boxes")
+        if options.color_ccd and (options.solver != "dat" or not options.no_planar_dat or
+                                  not options.build_broad_phase_boxes or not options.color_barrier_pairs):
+            raise ValueError("--color-ccd requires --solver dat --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs")
+        if options.color_ccd_method != "direct_rounding" and not options.color_ccd:
+            raise ValueError("--color-ccd-method plane requires --color-ccd")
+        if options.color_ccd_contact_forces and not options.color_ccd:
+            raise ValueError("--color-ccd-contact-forces requires --color-ccd")
+        if options.no_collisions and options.solver != "ipc":
+            raise ValueError("--no-collisions requires --solver ipc")
         if options.solver in ("dat", "dat-reference"):
             from gpu import select_newton_runtime
             select_newton_runtime("reference")
@@ -269,8 +331,8 @@ def main(argv=None):
                           "precision": "float32"}), flush=True)
         if options.check:
             return 0
-        if options.stock_cloth_twist and options.solver != "dat":
-            raise ValueError("--stock-cloth-twist selects the official scene for --solver dat; reference DAT already uses it")
+        if options.stock_cloth_twist and options.solver == "dat-reference":
+            raise ValueError("--solver dat-reference already selects the official scene")
         if options.solver == "dat-reference" or options.stock_cloth_twist:
             if options.no_graphs or options.benchmark_snapshot or options.scene_exporter is not None:
                 raise ValueError("Reference DAT runs the original example CLI; use its original graph/timing/scene options")
@@ -280,17 +342,51 @@ def main(argv=None):
             if options.test:
                 forwarded.append("--test")
             if options.stock_cloth_twist:
+                if options.solver == "ipc":
+                    from .dat_twist import run_gs
+                    return run_gs(forwarded, enable_collisions=not options.no_collisions)
                 from .dat_twist import run_own as run
-                return run(forwarded, enable_planar_dat=not options.no_planar_dat)
+                return run(forwarded, enable_planar_dat=not options.no_planar_dat,
+                           enable_broad_phase_boxes=options.build_broad_phase_boxes,
+                           enable_barrier_coloring=options.color_barrier_pairs,
+                           enable_color_ccd=options.color_ccd,
+                           **({"color_ccd_method": options.color_ccd_method} if options.color_ccd_method != "direct_rounding" else {}),
+                           vertex_contact_capacity=options.vertex_contact_capacity,
+                           edge_contact_capacity=options.edge_contact_capacity,
+                           **({"enable_color_ccd_contact_forces": True} if options.color_ccd_contact_forces else {}),
+                           **guess_options)
             from .dat_twist import run as run_twist
             return run_twist(forwarded)
         scene = importlib.import_module("gpu.scene")
         solver_module = importlib.import_module("gpu.solver" if options.solver == "ipc" else "gpu.solver_dat")
         with scene.SceneExporter(scene.find_exporter(options.scene_exporter), native) as exporter:
+            if options.level_based_ccd_guess:
+                exporter.scene["params"].update({"use_ccd_guess": False,"use_colored_ccd_guess": False,
+                    "use_colored_ccd_guess_level_based": True,
+                    "colored_ccd_guess_iters": guess_options["colored_ccd_guess_iters"],
+                    "colored_ccd_guess_fraction": guess_options["colored_ccd_guess_fraction"]})
+            if options.ccd_method is not None:
+                exporter.scene["params"]["ccd_method"] = options.ccd_method
             if options.no_planar_dat:
                 # Include the acceptance ablation in restart signatures while
                 # leaving existing default-run checkpoint signatures unchanged.
                 exporter.scene["params"]["enable_planar_dat"] = False
+                exporter.scene["params"]["collision_processing"] = False
+                if exporter.scene["params"].get("use_colored_ccd_guess_level_based",False):
+                    exporter.scene["params"]["solver_collision_processing"] = False
+                    exporter.scene["params"]["collision_processing"] = exporter.scene["params"].get("colored_ccd_guess_iters",1)>0
+            if options.build_broad_phase_boxes:
+                exporter.scene["params"]["enable_broad_phase_boxes"] = True
+            if options.color_barrier_pairs:
+                exporter.scene["params"]["enable_barrier_coloring"] = True
+            if options.color_ccd:
+                exporter.scene["params"].update({"enable_color_ccd": True,
+                    "solver_collision_processing": True, "collision_processing": True})
+            if options.color_ccd_method != "direct_rounding":
+                exporter.scene["params"]["color_ccd_method"] = options.color_ccd_method
+            if options.color_ccd_contact_forces:
+                exporter.scene["params"]["enable_color_ccd_contact_forces"] = True
+            if options.no_collisions:
                 exporter.scene["params"]["collision_processing"] = False
             model = scene.create_model(exporter.scene, device)
             solver_class = solver_module.SolverIPC if options.solver == "ipc" else solver_module.SolverDAT
@@ -301,11 +397,21 @@ def main(argv=None):
             solver_options = {"particle_enable_self_contact": not options.no_planar_dat,
                               "particle_self_contact_margin": dhat,
                               "particle_self_contact_gap": 0.75 * dhat,
-                              "enable_planar_dat": not options.no_planar_dat} if options.solver == "dat" else {}
+                              "enable_planar_dat": not options.no_planar_dat,
+                              "enable_broad_phase_boxes": options.build_broad_phase_boxes,
+                              "enable_barrier_coloring": options.color_barrier_pairs,
+                              "enable_color_ccd": options.color_ccd} if options.solver == "dat" else {
+                                  "enable_collisions": not options.no_collisions}
+            if options.color_ccd_method != "direct_rounding":
+                solver_options["color_ccd_method"] = options.color_ccd_method
+            if options.color_ccd_contact_forces:
+                solver_options["enable_color_ccd_contact_forces"] = True
+            vertex_capacity = options.vertex_contact_capacity or 128
+            edge_capacity = options.edge_contact_capacity or 256
             solver = solver_class(model, iterations=int(model.ipc.params["max_global_iters"]),
-                                  vertex_contact_capacity=options.vertex_contact_capacity,
-                                  edge_contact_capacity=options.edge_contact_capacity, **solver_options)
-            solver.contact_capacities = {"vertex": options.vertex_contact_capacity, "edge": options.edge_contact_capacity}
+                                  vertex_contact_capacity=vertex_capacity,
+                                  edge_contact_capacity=edge_capacity, **solver_options)
+            solver.contact_capacities = {"vertex": vertex_capacity, "edge": edge_capacity}
             solver.configuration = {**getattr(solver, "configuration", {}),
                                     "contact_capacities": solver.contact_capacities}
             return run_simulation(exporter, model, solver, graphs=not options.no_graphs, benchmark=options.benchmark,

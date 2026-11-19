@@ -1,4 +1,4 @@
-"""Replay actual unchanged resolve kernels, including their worker-private pool."""
+"""Replay FP32 resolve kernels through their retained legacy entry points."""
 import numpy as np
 import warp as wp
 from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
@@ -16,10 +16,10 @@ class SingleQueryResolver:
         self.info=TriMeshCollisionInfo()
         self.info.vertex_colliding_triangles=wp.array([0,0],int,device=self.device)
         self.info.edge_colliding_edges=wp.array([0,1],int,device=self.device)
-        self.words=wp.empty(2048*512 if self.device.is_cuda else 0,wp.uint32,device=self.device)
-        self.slots=wp.empty(512 if self.device.is_cuda else 0,int,device=self.device)
+        self.words=wp.empty(0,wp.uint32,device=self.device)
+        self.slots=wp.empty(0,int,device=self.device)
         self.pending=wp.zeros(1,int,device=self.device);self.count=wp.ones(1,int,device=self.device)
-        self.fraction=wp.ones(1,wp.float64,device=self.device);self.error=wp.zeros(1,int,device=self.device)
+        self.fraction=wp.ones(1,wp.float32,device=self.device);self.error=wp.zeros(1,int,device=self.device)
 
     def upload(self,case):
         self.q.assign(case['start']);self.end.assign(case['end']);self.ids.fill_(0 if case['kind']==0 else -1)
@@ -37,7 +37,7 @@ class SingleQueryResolver:
         # For one queued query the reducer is lossless: on success it writes
         # precisely PairResult[0]; every failure retains1 and maps status+200.
         # The original clip source sets full iff status==0 and fraction==1.
-        return np.array([fraction,float(status),float(status==0 and fraction==1.0)],dtype=np.float64)
+        return np.array([fraction,float(status),float(status==0 and fraction==1.0)],dtype=np.float32)
 
     def evaluate(self,case,*,cached):
         self.upload(case);self.launch(cached=cached)
@@ -58,10 +58,10 @@ class FixedBatchResolver:
         self.info=TriMeshCollisionInfo()
         self.info.vertex_colliding_triangles=ar([v for i in range(n) for v in [4*i,i]],int)
         self.info.edge_colliding_edges=ar([v for i in range(n) for v in [2*i,2*i+1]],int)
-        self.words=wp.empty(workers*2048*512 if self.device.is_cuda else 0,wp.uint32,device=self.device)
-        self.slots=wp.empty(workers*512 if self.device.is_cuda else 0,int,device=self.device)
+        self.words=wp.empty(0,wp.uint32,device=self.device)
+        self.slots=wp.empty(0,int,device=self.device)
         self.pending=wp.empty(n,int,device=self.device);self.count=wp.zeros(1,int,device=self.device)
-        self.fraction=wp.ones(1,wp.float64,device=self.device);self.error=wp.zeros(1,int,device=self.device)
+        self.fraction=wp.ones(1,wp.float32,device=self.device);self.error=wp.zeros(1,int,device=self.device)
 
     def select(self,first,last):
         batch=self.cases[first:last]

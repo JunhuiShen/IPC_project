@@ -1,8 +1,8 @@
 """Our linear-CCD predictors inside the actual Newton state/BVH pipeline.
 
 Targets are fixed at step-start plus velocity times dt, without gravity.
-Global prediction uses our Tight-Inclusion implementation and one 0.9 TOI
-fraction. Colored and level prediction use contact-only graph scheduling;
+Global prediction uses the same conservative FP32 CCD and shared clipping
+fraction as motion acceptance. Colored and level prediction use contact-only graph scheduling;
 the latter discards one trial and replays component/BFS groups. All graph
 counts, colors, trials, levels, geometry and acceptance remain on the device.
 """
@@ -17,7 +17,7 @@ from .contact import decode_candidate
 from .warp_build import configure_module as _configure
 
 
-HEADERS = ("global_guess.cuh", "level_schedule.cuh")
+HEADERS = ("level_schedule.cuh",)
 
 
 def configure_module(module=None):
@@ -42,101 +42,7 @@ def _targets(q: wp.array[wp.vec3], previous: wp.array[wp.vec3], velocity: wp.arr
         target[i] = value
 
 
-_GLOBAL_INPUT = r"""
-    using namespace ipc_gpu::solver::global_guess_detail;
-    Input input;
-    input.vertex_face=kind==0;
-    for(int i=0;i<4;++i)for(int k=0;k<3;++k) {
-        input.start[i][k]=double(start.data[nodes[i]][k]);
-        input.end[i][k]=double(target.data[nodes[i]][k]);
-    }
-    static_assert(sizeof(Cell)==4*sizeof(uint64_t),"Unexpected global CCD cell layout");
-"""
-
-
-@wp.func_native(_GLOBAL_INPUT + r"""
-    Cell* heap=reinterpret_cast<Cell*>(storage.data+size_t(worker)*256*4);
-    const auto out=solve(input,heap,256);
-    wp::vec_t<3,double> result;
-    result[0]=out.toi;result[1]=out.status;result[2]=out.capacity?1:0;
-    return result;
-""")
-def _global_small(start: wp.array[wp.vec3], target: wp.array[wp.vec3], nodes: wp.vec4i, kind: int,
-                   storage: wp.array[wp.uint64], worker: int) -> wp.vec3d: ...
-
-
-@wp.func_native(_GLOBAL_INPUT + r"""
-    Cell* heap=reinterpret_cast<Cell*>(storage.data);
-    const auto out=solve(input,heap,1<<20);
-    wp::vec_t<3,double> result;
-    result[0]=out.toi;result[1]=out.status;result[2]=out.capacity?1:0;
-    return result;
-""")
-def _global_large(start: wp.array[wp.vec3], target: wp.array[wp.vec3], nodes: wp.vec4i, kind: int,
-                   storage: wp.array[wp.uint64]) -> wp.vec3d: ...
-
-
-@wp.kernel
-def _global_begin(minimum: wp.array[wp.float64], pending_count: wp.array[int]):
-    minimum[0] = wp.float64(1.0)
-    pending_count[0] = 0
-
-
 from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
-
-
-@wp.kernel
-def _global_evaluate(start: wp.array[wp.vec3], target: wp.array[wp.vec3],
-                      triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
-                      ids: wp.array[int], count: wp.array[int], workers: int,
-                      storage: wp.array[wp.uint64], minimum: wp.array[wp.float64],
-                      pending: wp.array[int], pending_count: wp.array[int], error: wp.array[int]):
-    worker = wp.tid()
-    if error[0] == 0:
-        for at in range(worker, count[0], workers):
-            nodes, kind = decode_candidate(ids[at], triangles, edges, info)
-            result = _global_small(start, target, nodes, kind, storage, worker)
-            if result[1] != wp.float64(0.0):
-                wp.atomic_max(error, 0, 300 + int(result[1]))
-            elif result[2] != wp.float64(0.0):
-                slot = wp.atomic_add(pending_count, 0, 1)
-                if slot < pending.shape[0]:
-                    pending[slot] = at
-                else:
-                    wp.atomic_max(error, 0, 12)
-            else:
-                wp.atomic_min(minimum, 0, result[0])
-
-
-@wp.kernel
-def _global_retry(start: wp.array[wp.vec3], target: wp.array[wp.vec3],
-                   triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
-                   ids: wp.array[int], pending: wp.array[int], pending_count: wp.array[int],
-                   storage: wp.array[wp.uint64], minimum: wp.array[wp.float64], error: wp.array[int]):
-    if error[0] == 0:
-        for index in range(pending_count[0]):
-            nodes, kind = decode_candidate(ids[pending[index]], triangles, edges, info)
-            result = _global_large(start, target, nodes, kind, storage)
-            if result[1] != wp.float64(0.0):
-                wp.atomic_max(error, 0, 300 + int(result[1]))
-            elif result[2] != wp.float64(0.0):
-                wp.atomic_max(error, 0, 354)
-            else:
-                wp.atomic_min(minimum, 0, result[0])
-
-
-@wp.kernel
-def _global_proposal(start: wp.array[wp.vec3], target: wp.array[wp.vec3], flags: wp.array[int],
-                      minimum: wp.array[wp.float64], proposal: wp.array[wp.vec3], error: wp.array[int]):
-    i = wp.tid()
-    value = start[i]
-    if flags[i] & 1 != 0 and error[0] == 0:
-        alpha = minimum[0]
-        if alpha < wp.float64(1.0):
-            alpha *= wp.float64(.9)
-        for k in range(3):
-            value[k] = wp.float32(wp.float64(start[i][k]) + alpha * (wp.float64(target[i][k]) - wp.float64(start[i][k])))
-    proposal[i] = value
 
 
 @wp.kernel
@@ -429,17 +335,6 @@ class InitialGuess:
         self.targets = wp.empty(n, wp.vec3, device=self.device)
         self.proposal = wp.empty(n, wp.vec3, device=self.device)
         self.sweep_start = wp.empty(n, wp.vec3, device=self.device)
-        self.minimum = wp.ones(1, wp.float64, device=self.device)
-        self.pending = wp.empty(self.contacts.capacity, int, device=self.device)
-        self.pending_count = wp.zeros(1, int, device=self.device)
-        # Tight-Inclusion's small queue is independent per query and does not
-        # use the scarce multi-limb exact arenas. Fill the GPU with ordinary
-        # lanes rather than restricting this whole pass to 16 single threads.
-        self.global_workers = (min(max(1, self.contacts.capacity), self.contacts.fast_workers)
-                               if self.device.is_cuda else self.contacts.workers)
-        self.global_block_dim = 32 if self.device.is_cuda else 1
-        self.small_heap = wp.empty(self.global_workers * 256 * 4, wp.uint64, device=self.device)
-        self.large_heap = wp.empty((1 << 20) * 4, wp.uint64, device=self.device)
         self.color = wp.zeros(1, int, device=self.device)
         self.color_condition = wp.zeros(1, int, device=self.device)
         self.sweep = wp.zeros(1, int, device=self.device)
@@ -483,8 +378,8 @@ class InitialGuess:
         level = bool(params.get("use_colored_ccd_guess_level_based", False))
         if legacy and level:
             raise ValueError("Choose one colored CCD predictor")
-        if self.independent_colors and (not legacy or level):
-            raise ValueError("Independent predictor colors require the original colored CCD mode")
+        if self.independent_colors and not (legacy or level):
+            raise ValueError("Independent predictor colors require a colored CCD mode")
         sweeps = params.get("colored_ccd_guess_iters", 0)
         fraction = params.get("colored_ccd_guess_fraction", 1.0)
         if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 0:
@@ -507,18 +402,9 @@ class InitialGuess:
             raise ValueError("The CCD predictor requires the actual Newton triangle-mesh detector")
         c.detect_swept(detector, self.start, self.targets, 1.0e-8)
         if global_guess:
-            wp.launch(_global_begin, 1, [self.minimum, self.pending_count], device=self.device)
-            if c.capacity:
-                wp.launch(_global_evaluate, self.global_workers,
-                    [self.start, self.targets, self.model.tri_indices, self.model.edge_indices, c.info,
-                     c.candidate_ids, c.candidate_count, self.global_workers, self.small_heap, self.minimum,
-                     self.pending, self.pending_count, c.error], device=self.device, block_dim=self.global_block_dim)
-                wp.launch(_global_retry, 1,
-                    [self.start, self.targets, self.model.tri_indices, self.model.edge_indices, c.info,
-                     c.candidate_ids, self.pending, self.pending_count, self.large_heap, self.minimum, c.error], device=self.device, block_dim=1)
-            wp.launch(_global_proposal, self.model.particle_count,
-                [self.start, self.targets, self.model.particle_flags, self.minimum, self.proposal, c.error], device=self.device)
-            return self.ccd.accept(q, self.proposal, -1, dt, bounded=False)
+            # One FP32 CCD pass computes the common conservative fraction and
+            # rechecks its rounded endpoint. There is no separate FP64 TOI pass.
+            return self.ccd.accept(q, self.targets, -1, dt, bounded=False)
         if self.graph is None:
             raise RuntimeError("Prepare colored predictor workspaces before CUDA graph capture")
         g = self.graph
@@ -527,7 +413,9 @@ class InitialGuess:
             self.query_groups.build(g.colors)
         colors = g.colors
         if level:
-            self._sweep(q, colors, dt)
+            # The discarded probe must use the same per-vertex acceptance as
+            # the updating sweeps: its movement determines the level ordering.
+            self._sweep(q, colors, dt, independent=self.independent_colors)
             g.finish_trial(q, self.start, c)
             wp.copy(q, self.start)
             colors = g.groups
@@ -536,7 +424,7 @@ class InitialGuess:
         wp.launch(_sweep_begin, 1, [self.sweep, self.sweep_condition, c.error], device=self.device)
 
         def sweep_body():
-            self._sweep(q, colors, dt, independent=self.independent_colors and legacy and not level)
+            self._sweep(q, colors, dt, independent=self.independent_colors)
             wp.launch(_sweep_next, 1,
                 [self.sweep, self.sweep_condition, sweeps, self.bits, c.error], device=self.device)
 

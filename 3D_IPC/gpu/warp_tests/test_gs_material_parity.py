@@ -1,4 +1,10 @@
-"""Production GS material proposals use DAT's energy/PSD-block policy."""
+"""Legacy SolverIPC proposals retain their native PSD-block material policy.
+
+The newer VBD-based SolverDAT path intentionally uses the project's analytic
+membrane Hessian. It is no longer a valid Hessian oracle for SolverIPC. These
+tests use the pinned native kernels for the retained PSD blocks and bending,
+and an independent NumPy/SVD corotated membrane-force calculation.
+"""
 
 import unittest
 from unittest.mock import patch
@@ -15,7 +21,7 @@ from .test_gs_schedule import dynamic_arguments
 
 
 @wp.kernel(module="unique", enable_backward=False)
-def dat_material_terms(
+def legacy_reference_material_terms(
     dt: float, previous: wp.array[wp.vec3], q: wp.array[wp.vec3],
     triangles: wp.array2d[int], poses: wp.array[wp.mat22], materials: wp.array2d[float], areas: wp.array[float],
     edges: wp.array2d[int], angles: wp.array[float], lengths: wp.array[float], bending: wp.array2d[float],
@@ -25,12 +31,62 @@ def dat_material_terms(
     forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33],
 ):
     vertex = wp.tid()
-    force, hessian = dat.accumulate_elasticity_force_and_hessian(
-        vertex, dt, previous, q, triangles, poses, materials, areas, edges, angles, lengths, bending,
-        tets, tet_poses, tet_materials, adjacency, wp.vec3(0.0), wp.mat33(0.0),
-        own_materials, coefficients, stiffness, gradients, measures)
+    force = wp.vec3(0.0)
+    hessian = wp.mat33(0.0)
+    # Deliberately scan elements rather than reusing GS adjacency assembly.
+    # The membrane force is added independently on the host below; the
+    # unchanged native Neo-Hookean evaluator supplies only its PSD Hessian.
+    for face in range(triangles.shape[0]):
+        if materials[face, 0] > 0.0 or materials[face, 1] > 0.0:
+            for role in range(3):
+                if triangles[face, role] == vertex:
+                    unused_force, block = dat.stock.evaluate_neo_hookean_membrane_force_hessian(
+                        face, role, q, previous, triangles, poses[face], areas[face],
+                        own_materials[face, 0], own_materials[face, 1], 0.0, dt)
+                    hessian += block
+    for edge in range(edges.shape[0]):
+        if (bending[edge, 0] > 0.0 and stiffness[edge] > 0.0 and coefficients[edge] > 0.0
+                and edges[edge, 0] >= 0 and edges[edge, 1] >= 0 and lengths[edge] > 0.0):
+            # Equal potentials: (ke*L0/2)*theta^2 = kB*c_e*theta^2.
+            mapped_stiffness = 2.0 * stiffness[edge] * coefficients[edge] / lengths[edge]
+            for role in range(4):
+                if edges[edge, role] == vertex:
+                    term, block = dat.stock.evaluate_dihedral_angle_based_bending_force_hessian(
+                        edge, role, q, previous, edges, angles, lengths, mapped_stiffness, 0.0, dt)
+                    force += term
+                    hessian += block
+    for tet in range(tets.shape[0]):
+        if tet_materials[tet, 0] > 0.0 or tet_materials[tet, 1] > 0.0:
+            for role in range(4):
+                if tets[tet, role] == vertex:
+                    term, block = dat.evaluate_own_solid_force_hessian(
+                        tet, role, previous, q, tets, tet_poses[tet], tet_materials[tet, 0],
+                        tet_materials[tet, 1], 0.0, dt, gradients, measures)
+                    force += term
+                    hessian += block
     forces[vertex] = force
     hessians[vertex] = hessian
+
+
+def corotated_membrane_force(q, triangles, inverses, areas, original_materials, own_materials):
+    """Independent binary64 SVD derivative, for these nondegenerate fixtures."""
+    force = np.zeros_like(q, dtype=np.float64)
+    for face, vertices in enumerate(triangles):
+        if not np.any(original_materials[face, :2] > 0.):
+            continue
+        x = q[vertices]
+        inverse = inverses[face].astype(np.float64)
+        f = np.column_stack((x[1] - x[0], x[2] - x[0])) @ inverse
+        u, singular, vt = np.linalg.svd(f, full_matrices=False)
+        rotation = u @ vt
+        j = float(np.prod(singular))
+        mu, lam = own_materials[face]
+        stress = 2. * mu * (f - rotation) + lam * (j - 1.) * j * f @ np.linalg.inv(f.T @ f)
+        edge_force = -float(areas[face]) * stress @ inverse.T
+        force[vertices[1]] += edge_force[:, 0]
+        force[vertices[2]] += edge_force[:, 1]
+        force[vertices[0]] -= edge_force[:, 0] + edge_force[:, 1]
+    return force
 
 
 class GsMaterialParityTests(unittest.TestCase):
@@ -77,7 +133,7 @@ class GsMaterialParityTests(unittest.TestCase):
         data = solver._energy_materials
         force = wp.empty(4, wp.vec3, device=model.device)
         hessian = wp.empty(4, wp.mat33, device=model.device)
-        wp.launch(dat_material_terms, 4,
+        wp.launch(legacy_reference_material_terms, 4,
             [dt, solver.particle_q_prev, state.particle_q,
              model.tri_indices, model.tri_poses, model.tri_materials, model.tri_areas,
              model.edge_indices, model.edge_rest_angle, model.edge_rest_length, model.edge_bending_properties,
@@ -86,6 +142,8 @@ class GsMaterialParityTests(unittest.TestCase):
              data.tet_gradients, data.tet_measures, force, hessian], device=model.device)
         q = state.particle_q.numpy().astype(np.float64)
         f = force.numpy().astype(np.float64) + solver.particle_forces.numpy()
+        f += corotated_membrane_force(q, model.tri_indices.numpy(), model.tri_poses.numpy(),
+            model.tri_areas.numpy(), model.tri_materials.numpy(), data.triangle_materials.numpy())
         h = hessian.numpy().astype(np.float64) + solver.particle_hessians.numpy()
         mass = model.particle_mass.numpy()
         targets, pins = data.pin_targets.numpy(), data.pin_mask.numpy()
@@ -99,7 +157,7 @@ class GsMaterialParityTests(unittest.TestCase):
             expected[vertex] += solver.params["damping"] * np.linalg.solve(h[vertex], f[vertex])
         return expected
 
-    def test_production_static_color_proposals_match_DAT_material_banks_and_psd_blocks(self):
+    def test_production_static_color_proposals_match_legacy_material_banks_and_psd_blocks(self):
         for device in self.devices:
             with self.subTest(device=str(device)):
                 model, solver, state = self.fixture(device)
@@ -113,7 +171,7 @@ class GsMaterialParityTests(unittest.TestCase):
                 np.testing.assert_allclose(solver.proposals.numpy(), expected, rtol=3e-6, atol=3e-6)
                 self.assertEqual(int(solver.error.numpy()[0]), 0)
 
-    def test_dynamic_and_tiled_kernels_match_DAT_on_the_same_frozen_snapshot(self):
+    def test_dynamic_and_tiled_kernels_match_legacy_reference_on_the_same_frozen_snapshot(self):
         for device in self.devices:
             model, solver, state = self.fixture(device)
             data = solver._energy_materials
@@ -200,7 +258,7 @@ class GsMaterialParityTests(unittest.TestCase):
                 self.assertEqual(int(solver.error.numpy()[0]), 0)
 
 
-gs.energy.configure_module(dat_material_terms)
+gs.energy.configure_module(legacy_reference_material_terms)
 gs.energy.configure_module(__name__)
 
 if __name__ == "__main__":

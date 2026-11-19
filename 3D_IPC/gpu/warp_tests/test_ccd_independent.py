@@ -183,6 +183,18 @@ class IndependentCcdTests(unittest.TestCase):
             self.assertGreaterEqual(int(backend.attempts.numpy()[0]), 2)
             self.assertEqual(int(backend.verified.numpy()[0]), 1)
 
+    def test_box_smaller_than_coordinate_ulp_keeps_represented_center(self):
+        for device in self.devices:
+            data = fixture(device, plane=100000000., height=16.)
+            proposed = data.start.copy()
+            proposed[0, 2] -= 32.
+            backend = CcdBackend(data.contacts, node_box_radius=.01)
+            accept(data, backend, wp.array(proposed, wp.vec3, device=device))
+            backend.check()
+            # No other float32 Z fits this radius. Staying at the exact box
+            # center must not be reported as invalid or cross the plane.
+            np.testing.assert_array_equal(data.q.numpy(), data.start)
+
     def test_host_and_device_stale_epochs_cannot_commit_independent_updates(self):
         for device in self.devices:
             for host_stale in (False, True):

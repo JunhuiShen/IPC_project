@@ -81,6 +81,8 @@ class SolverDAT(SolverVBD):
 
     def __init__(self, model: Model, *, iterations=None, vertex_contact_capacity=128,
                  edge_contact_capacity=256, allow_cpu=False):
+        # The shared status checker also supports collision-disabled GS.
+        self.enable_collisions = True
         if not hasattr(model, "ipc"):
             raise TypeError("Build the actual Newton Model with gpu.scene.create_model")
         if model.body_count:

@@ -113,7 +113,7 @@ class StockLayoutMaterialTests(unittest.TestCase):
         self.assertIs(again.triangle_materials,mapped_tri)
         self.assertEqual(fingerprint(model),before)
 
-    def test_triangle_uses_own_energy_force_and_native_quasi_newton_rest_hessian(self):
+    def test_triangle_uses_project_energy_gradient_and_rest_hessian(self):
         inverse=np.array([[1.1,-.2],[.05,.9]],np.float32);x=np.array([[.1,-.2,.3],[1.2,.1,.25],[.2,1.1,.55]],np.float32)
         f=wp.empty(3,wp.vec3,device=self.device);h=wp.empty(3,wp.mat33,device=self.device)
         wp.launch(_tri_probe,3,[self.ar(x,wp.vec3),self.ar(x*1.2+.7,wp.vec3),self.ar([[0,1,2]],int),wp.mat22(inverse),.48,99.,111.,self.ar([[17.3,23.1]],wp.float32),f,h],device=self.device)
@@ -123,10 +123,10 @@ class StockLayoutMaterialTests(unittest.TestCase):
         wp.launch(_tri_probe,3,[self.ar(rest,wp.vec3),self.ar(rest+.3,wp.vec3),self.ar([[0,1,2]],int),wp.mat22(np.eye(2)),.5,99.,111.,self.ar([[3.,5.]],wp.float32),f,h],device=self.device)
         gradients=np.array([[-1,-1],[1,0],[0,1]])
         for role,(a,b) in enumerate(gradients):
-            # Native PSD quasi-Newton H: the corotated energy gradient above
-            # remains unchanged; this matrix only approximates its local solve.
+            # Linearized corotation has in-plane elasticity but no normal
+            # membrane stiffness at the unstressed rest configuration.
             gradient=np.array([a,b,0])
-            expected_h=.5*(3*(a*a+b*b)*np.eye(3)+(5+3)*np.outer(gradient,gradient))
+            expected_h=.5*(3*(a*a+b*b)*np.diag([1,1,0])+(5+3)*np.outer(gradient,gradient))
             np.testing.assert_allclose(h.numpy()[role],expected_h,rtol=2e-5,atol=2e-5)
         np.testing.assert_allclose(f.numpy(),0,atol=2e-6)
 

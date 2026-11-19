@@ -3,8 +3,8 @@
 Newton provides the project Model/State, adjacency, BVHs and timestep. This
 module owns movement budgets, contact-independent colors, level schedules,
 local material proposals and the GS hooks. Shared material equations remain
-in energy.py and dat_energies.py; GS and DAT share the material laws and
-PSD approximations without importing either runtime-dependent controller.
+in energy.py and dat_energies.py. This legacy controller retains native PSD
+material approximations; the newer VBD-based SolverDAT uses project Hessians.
 """
 from __future__ import annotations
 
@@ -60,8 +60,8 @@ TILE_SIZE = 16
 def _membrane_terms(face: int, role: int, pos: wp.array[wp.vec3], previous: wp.array[wp.vec3],
                     triangles: wp.array2d[int], inverse: wp.mat22, area: float,
                     mu: float, lam: float, dt: float):
-    # Share DAT's corotated force, native PSD quasi-Newton Hessian and
-    # degeneracy guards. Material damping is omitted by both energy adapters.
+    # Retain the legacy corotated force, native PSD quasi-Newton Hessian and
+    # degeneracy guards. Material damping is omitted by this energy adapter.
     return material_energy.evaluate_corotated_force_native_hessian(
         face, role, pos, previous, triangles, inverse, area, mu, lam, 0.0, dt)
 
@@ -337,301 +337,8 @@ def solve_elasticity_scalar(
     _finish_particle(particle,dt,pos,mass,inertia,particle_forces,particle_hessians,
         pin_targets,pin_mask,kpin,damping,f,h,particle_displacements,proposals,error)
 
-# Canonical parallel component and level schedules.
-
-@wp.kernel
-def _initialize(moving: wp.array[wp.uint8], movement: wp.array[wp.float64],
-                colors: wp.array[int], trial_order: wp.array[int], seen: wp.array[int],
-                labels: wp.array[int], largest: wp.array[wp.float64], error: wp.array[int]):
-    v = wp.tid()
-    labels[v] = v
-    largest[v] = wp.float64(-1.0)
-    if moving[v] > wp.uint8(1) or not wp.isfinite(movement[v]) or movement[v] < wp.float64(0.0):
-        wp.atomic_max(error, 0, 373 if wp.isfinite(movement[v]) == False or movement[v] < wp.float64(0.0) else 371)
-    q = trial_order[v]
-    if q < 0 or q >= colors.shape[0]:
-        wp.atomic_max(error, 0, 371)
-    else:
-        if colors[q] < 0 or colors[q] >= colors.shape[0]:
-            wp.atomic_max(error, 0, 371)
-        old = wp.atomic_add(seen, q, 1)
-        if old != 0:
-            wp.atomic_max(error, 0, 371)
-
-
-@wp.kernel
-def _validate_rows(rows: wp.array[wp.uint64], adjacency: wp.array[int], error: wp.array[int]):
-    v = wp.tid()
-    n = rows.shape[0]-1
-    begin = rows[v]
-    end = rows[v+1]
-    if (v == 0 and begin != wp.uint64(0)) or begin > end or end > wp.uint64(adjacency.shape[0]):
-        wp.atomic_max(error, 0, 371)
-    elif error[0] == 0:
-        previous = int(-1)
-        for at in range(int(begin), int(end)):
-            neighbor = adjacency[at]
-            if neighbor < 0 or neighbor >= n or neighbor == v or neighbor <= previous:
-                wp.atomic_max(error, 0, 371)
-            previous = neighbor
-
-
-@wp.kernel
-def _start_loop(condition: wp.array[int], iterations: wp.array[int], error: wp.array[int]):
-    condition[0] = int(error[0] == 0)
-    iterations[0] = 0
-
-
-@wp.kernel
-def _next_loop(changed: wp.array[int], condition: wp.array[int], iterations: wp.array[int],
-               maximum: int, error: wp.array[int]):
-    iterations[0] += 1
-    condition[0] = int(changed[0] != 0 and error[0] == 0)
-    if condition[0] != 0 and iterations[0] > maximum:
-        wp.atomic_max(error, 0, 371)
-        condition[0] = 0
-
-
-@wp.kernel
-def _component_pass(rows: wp.array[wp.uint64], adjacency: wp.array[int],
-                    source: wp.array[int], target: wp.array[int], changed: wp.array[int], error: wp.array[int]):
-    v = wp.tid()
-    if error[0] == 0:
-        best = source[v]
-        for at in range(int(rows[v]), int(rows[v+1])):
-            best = wp.min(best, source[adjacency[at]])
-        best = wp.min(best, source[best])
-        target[v] = best
-        if best != source[v]:
-            wp.atomic_or(changed, 0, 1)
-
-
-@wp.kernel
-def _component_maximum(labels: wp.array[int], moving: wp.array[wp.uint8],
-                        movement: wp.array[wp.float64], largest: wp.array[wp.float64], error: wp.array[int]):
-    v = wp.tid()
-    if error[0] == 0 and moving[v] != wp.uint8(0):
-        wp.atomic_max(largest, labels[v], movement[v])
-
-
-@wp.kernel
-def _seed_levels(labels: wp.array[int], moving: wp.array[wp.uint8], movement: wp.array[wp.float64],
-                  largest: wp.array[wp.float64], levels: wp.array[int], error: wp.array[int]):
-    v = wp.tid()
-    if error[0] == 0:
-        maximum = largest[labels[v]]
-        levels[v] = levels.shape[0]
-        if maximum < wp.float64(0.0) or (moving[v] != wp.uint8(0) and movement[v] == maximum):
-            levels[v] = 0
-
-
-@wp.kernel
-def _level_pass(rows: wp.array[wp.uint64], adjacency: wp.array[int], source: wp.array[int],
-                target: wp.array[int], changed: wp.array[int], error: wp.array[int]):
-    v = wp.tid()
-    if error[0] == 0:
-        best = source[v]
-        for at in range(int(rows[v]), int(rows[v+1])):
-            value = source[adjacency[at]]
-            if value < source.shape[0]:
-                best = wp.min(best, value+1)
-        target[v] = best
-        if best != source[v]:
-            wp.atomic_or(changed, 0, 1)
-
-
-@wp.kernel
-def _active_keys(trial_order: wp.array[int], colors: wp.array[int], levels: wp.array[int],
-                  moving: wp.array[wp.uint8], keys: wp.array[wp.int64], values: wp.array[int],
-                  histogram: wp.array[int], active: wp.array[int], error: wp.array[int]):
-    rank = wp.tid()
-    if error[0] == 0:
-        v = trial_order[rank]
-        values[rank] = v
-        if moving[v] != wp.uint8(0):
-            level = levels[v]
-            if level < 0 or level >= levels.shape[0]:
-                wp.atomic_max(error, 0, 371)
-            else:
-                keys[rank] = wp.int64(level)*wp.int64(levels.shape[0])+wp.int64(rank)
-                wp.atomic_add(histogram, level, 1)
-                wp.atomic_add(active, 0, 1)
-        else:
-            keys[rank] = wp.int64(9223372036854775807)
-
-
-@wp.kernel
-def _boundaries(values: wp.array[int], levels: wp.array[int], colors: wp.array[int], active: wp.array[int],
-                 order: wp.array[int], boundaries: wp.array[int], error: wp.array[int]):
-    i = wp.tid()
-    boundaries[i] = 0
-    if error[0] == 0 and i < active[0]:
-        v = values[i]
-        order[i] = v
-        boundary = int(i == 0)
-        if i > 0:
-            previous = values[i-1]
-            boundary = int(levels[v] != levels[previous] or colors[v] != colors[previous])
-        boundaries[i] = boundary
-
-
-@wp.kernel
-def _publish(boundaries: wp.array[int], group_scan: wp.array[int], active: wp.array[int],
-              offsets: wp.array[int], metadata: wp.array[int], error: wp.array[int]):
-    i = wp.tid()
-    if error[0] == 0:
-        if i < active[0] and boundaries[i] != 0:
-            offsets[group_scan[i]-1] = i
-        if i == 0:
-            groups = int(0)
-            if active[0] != 0:
-                groups = group_scan[active[0]-1]
-            metadata[1] = groups
-            metadata[2] = active[0]
-            offsets[groups] = active[0]
-
-
-class ParallelLevels:
-    def __init__(self, graph):
-        self.graph, self.n, self.device = graph, graph.n, graph.device
-        self.labels = [wp.empty(self.n, int, device=self.device) for _ in range(2)]
-        self.level_temporary = wp.empty(self.n, int, device=self.device)
-        self.seen = wp.zeros(self.n, int, device=self.device)
-        self.largest = wp.empty(self.n, wp.float64, device=self.device)
-        self.histogram = wp.zeros(self.n+1, int, device=self.device)
-        self.boundaries = wp.zeros(self.n, int, device=self.device)
-        self.group_scan = wp.empty(self.n, int, device=self.device)
-        self.active = wp.zeros(1, int, device=self.device)
-        self.changed = wp.zeros(1, int, device=self.device)
-        self.condition = wp.zeros(1, int, device=self.device)
-        self.iterations = wp.zeros(1, int, device=self.device)
-
-    def apply(self, contacts):
-        g, n, d = self.graph, self.n, self.device
-        if n == 0:
-            raise ValueError('Empty model is not a supported predictor epoch')
-        self.seen.zero_(); self.histogram.zero_(); self.active.zero_()
-        wp.launch(_initialize,n,[g.moving,g.movement,g.colors,g.trial_order,self.seen,self.labels[0],self.largest,contacts.error],device=d)
-        wp.launch(_validate_rows,n,[g.rows,g.adjacency,contacts.error],device=d)
-        wp.launch(_start_loop,1,[self.condition,self.iterations,contacts.error],device=d)
-        def component_body():
-            self.changed.zero_()
-            wp.launch(_component_pass,n,[g.rows,g.adjacency,self.labels[0],self.labels[1],self.changed,contacts.error],device=d)
-            wp.launch(_component_pass,n,[g.rows,g.adjacency,self.labels[1],self.labels[0],self.changed,contacts.error],device=d)
-            wp.launch(_next_loop,1,[self.changed,self.condition,self.iterations,n,contacts.error],device=d)
-        wp.capture_while(self.condition,component_body)
-        wp.launch(_component_maximum,n,[self.labels[0],g.moving,g.movement,self.largest,contacts.error],device=d)
-        wp.launch(_seed_levels,n,[self.labels[0],g.moving,g.movement,self.largest,g.levels,contacts.error],device=d)
-        wp.launch(_start_loop,1,[self.condition,self.iterations,contacts.error],device=d)
-        def level_body():
-            self.changed.zero_()
-            wp.launch(_level_pass,n,[g.rows,g.adjacency,g.levels,self.level_temporary,self.changed,contacts.error],device=d)
-            wp.launch(_level_pass,n,[g.rows,g.adjacency,self.level_temporary,g.levels,self.changed,contacts.error],device=d)
-            wp.launch(_next_loop,1,[self.changed,self.condition,self.iterations,n,contacts.error],device=d)
-        wp.capture_while(self.condition,level_body)
-        wp.launch(_active_keys,n,[g.trial_order,g.colors,g.levels,g.moving,g.keys,g.values,self.histogram,self.active,contacts.error],device=d)
-        wp.utils.radix_sort_pairs(g.keys,g.values,n)
-        wp.utils.array_scan(self.histogram,g.level_offsets,inclusive=True)
-        wp.launch(_boundaries,n,[g.values,g.levels,g.colors,self.active,g.order,self.boundaries,contacts.error],device=d)
-        wp.utils.array_scan(self.boundaries,self.group_scan,inclusive=True)
-        wp.launch(_publish,n,[self.boundaries,self.group_scan,self.active,g.offsets,g.metadata,contacts.error],device=d)
-
-# Canonical parallel greedy colors.
-
-@wp.func_native(r"""
-    unsigned long long forbidden[2]={0,0};
-    for(uint64_t at=rows.data[vertex];at<rows.data[vertex+1];++at) {
-        const int neighbor=adjacency.data[at];
-        if(neighbor>=vertex)break;
-        const int color=colors.data[neighbor];
-        if(color<0)return -1;
-        if(color<128)forbidden[color/64]|=1ull<<(color%64);
-    }
-    for(int word=0;word<2;++word) {
-        const unsigned long long available=~forbidden[word];
-        if(available) {
-#if defined(__CUDA_ARCH__)
-            return 64*word+__ffsll(static_cast<long long>(available))-1;
-#else
-            for(int bit=0;bit<64;++bit)if(available&(1ull<<bit))return 64*word+bit;
-#endif
-        }
-    }
-    // No color-count cap: graphs requiring more than 128 colors retain the
-    // same exact minimum-free-color search as the original implementation.
-    for(int color=128;color<colors.shape[0];++color) {
-        bool available=true;
-        for(uint64_t at=rows.data[vertex];at<rows.data[vertex+1];++at) {
-            const int neighbor=adjacency.data[at];
-            if(neighbor>=vertex)break;
-            if(colors.data[neighbor]==color){available=false;break;}
-        }
-        if(available)return color;
-    }
-    return -1;
-""")
-def _ready_color(rows:wp.array[wp.uint64],adjacency:wp.array[int],colors:wp.array[int],vertex:int)->int: ...
-
-
-@wp.func_native(r"""
-#if defined(__CUDA_ARCH__)
-    const unsigned mask=__activemask();
-    const unsigned votes=__ballot_sync(mask,pending!=0);
-    return votes!=0 && static_cast<int>(threadIdx.x%32)==__ffs(mask)-1;
-#else
-    return pending!=0;
-#endif
-""")
-def _pending_leader(pending:int)->bool: ...
-
-
-@wp.kernel
-def _color_pass(rows:wp.array[wp.uint64],adjacency:wp.array[int],source:wp.array[int],
-                target:wp.array[int],pending:wp.array[int],error:wp.array[int]):
-    vertex=wp.tid()
-    remaining=int(0)
-    if error[0]==0:
-        color=source[vertex]
-        if color<0:color=_ready_color(rows,adjacency,source,vertex)
-        target[vertex]=color
-        remaining=int(color<0)
-    if _pending_leader(remaining):wp.atomic_or(pending,0,1)
-
-
-@wp.kernel
-def _publish_colors(colors:wp.array[int],trial_order:wp.array[int],metadata:wp.array[int],error:wp.array[int]):
-    vertex=wp.tid()
-    if error[0]==0:
-        color=colors[vertex]
-        if color<0 or color>=colors.shape[0]:wp.atomic_max(error,0,371)
-        else:
-            wp.atomic_max(metadata,0,color+1)
-            wp.atomic_max(metadata,1,color+1)
-            trial_order[vertex]=vertex
-        if vertex==0:metadata[2]=colors.shape[0]
-
-
-class ParallelColors:
-    def __init__(self,graph):
-        self.graph,self.n,self.device=graph,graph.n,graph.device
-        self.temporary=wp.empty(self.n,int,device=self.device)
-        self.pending=wp.zeros(1,int,device=self.device)
-        self.condition=wp.zeros(1,int,device=self.device)
-        self.iterations=wp.zeros(1,int,device=self.device)
-
-    def apply(self,contacts):
-        g,n,d=self.graph,self.n,self.device
-        if n==0:raise ValueError('Empty model is not a supported predictor epoch')
-        wp.launch(_validate_rows,n,[g.rows,g.adjacency,contacts.error],device=d)
-        g.colors.fill_(-1);g.metadata.zero_()
-        wp.launch(_start_loop,1,[self.condition,self.iterations,contacts.error],device=d)
-        def body():
-            self.pending.zero_()
-            wp.launch(_color_pass,n,[g.rows,g.adjacency,g.colors,self.temporary,self.pending,contacts.error],device=d)
-            wp.launch(_color_pass,n,[g.rows,g.adjacency,self.temporary,g.colors,self.pending,contacts.error],device=d)
-            wp.launch(_next_loop,1,[self.pending,self.condition,self.iterations,n,contacts.error],device=d)
-        wp.capture_while(self.condition,body)
-        wp.launch(_publish_colors,n,[g.colors,g.trial_order,g.metadata,contacts.error],device=d)
+# Shared with the native VBD predictor; importing these does not select a Newton runtime.
+from .initial_guess_schedule import ParallelColors, ParallelLevels, _validate_rows, _start_loop
 
 # Movement budgets and contact-aware GS scheduling.
 
@@ -1112,16 +819,22 @@ class GsSchedule:
     candidate refresh, and call ``sweep(body)`` once per GS iteration. The body
     reads ``current_color`` and ``colors`` and uses ``query_view`` for contacts.
     """
-    def __init__(self, contacts, *, warm_colors=True, material_slot_budget=None):
-        self.contacts, self.model, self.device = contacts, contacts.model, contacts.device
+    def __init__(self, contacts=None, *, model=None, error=None, warm_colors=True, material_slot_budget=None):
+        self.contacts = contacts
+        self.model = contacts.model if contacts is not None else model
+        if self.model is None or (contacts is None and error is None):
+            raise ValueError("Material-only GS needs its model and numerical error array")
+        self.device = self.model.device
+        self.error = contacts.error if contacts is not None else error
+        self._built = False
         self.n = self.model.particle_count
         if self.n <= 0:
             raise ValueError("Contact-aware particle GS needs a nonempty model")
-        if not getattr(contacts, "track_query_epoch", False):
+        if contacts is not None and not getattr(contacts, "track_query_epoch", False):
             raise ValueError("Contact-aware GS requires candidate epoch tracking")
         self.stride = (self.n + 31) // 32
         material_edges = 3 * self.model.tri_count + 6 * self.model.edge_count + 6 * self.model.tet_count
-        capacity = min(self.n * (self.n - 1) // 2, material_edges + 6 * contacts.capacity)
+        capacity = min(self.n * (self.n - 1) // 2, material_edges + (6 * contacts.capacity if contacts is not None else 0))
         if self.n * self.stride >= 2**31 or capacity >= 2**31:
             raise ValueError("Contact-aware GS graph exceeds its int32 GPU index capacity")
         self.material_bits = wp.zeros(self.n * self.stride, wp.uint32, device=self.device)
@@ -1140,15 +853,15 @@ class GsSchedule:
         self.current_color = wp.zeros(1, int, device=self.device)
         self.condition = wp.zeros(1, int, device=self.device)
         self.parallel_colors = WarmColors(self) if warm_colors else ParallelColors(self)
-        self.query_groups = QueryGroups(contacts)
-        if not self.query_groups.enabled:
+        self.query_groups = QueryGroups(contacts) if contacts is not None else None
+        if self.query_groups is not None and not self.query_groups.enabled:
             raise ValueError("Contact-aware GS candidate grouping exceeds its int32 GPU index capacity")
         self.query_view = None
         primitive_count = self.model.tri_count + self.model.edge_count + self.model.tet_count
         if primitive_count:
             wp.launch(_material_edges, primitive_count,
                 [self.model.tri_indices, self.model.edge_indices, self.model.tet_indices,
-                 self.stride, self.material_bits, contacts.error], device=self.device)
+                 self.stride, self.material_bits, self.error], device=self.device)
         if material_slot_budget is None:
             # Two 32-thread blocks per SM, capped at 256 blocks, with two
             # vertex slots per block. Larger groups reuse this bounded pool.
@@ -1165,38 +878,40 @@ class GsSchedule:
     def rebuild(self):
         c, m = self.contacts, self.model
         wp.copy(self.bits, self.material_bits)
-        if c.capacity:
+        if c is not None and c.capacity:
             wp.launch(_contact_edges, c.fast_workers,
                 [m.tri_indices, m.edge_indices, c.info, c.candidate_ids, c.candidate_count,
                  c.fast_workers, self.stride, self.bits, c.error], device=self.device)
         wp.launch(_degrees, self.n + 1, [self.bits, self.stride, self.degrees], device=self.device)
         wp.utils.array_scan(self.degrees, self.scan, inclusive=False)
         wp.launch(_rows, self.n + 1,
-            [self.bits, self.stride, self.scan, self.rows, self.adjacency, c.error], device=self.device)
-        self.parallel_colors.apply(c)
+            [self.bits, self.stride, self.scan, self.rows, self.adjacency, self.error], device=self.device)
+        self.parallel_colors.apply(self)
         self.counts.zero_()
         self.cursors.zero_()
-        wp.launch(_count_colors, self.n, [self.colors, self.counts, c.error], device=self.device)
+        wp.launch(_count_colors, self.n, [self.colors, self.counts, self.error], device=self.device)
         wp.utils.array_scan(self.counts, self.offsets, inclusive=False)
-        wp.launch(_pack_colors, self.n, [self.colors, self.offsets, self.cursors, self.order, c.error], device=self.device)
-        self.query_groups.build(self.colors)
-        self.query_view = self.query_groups.view(self.current_color)
+        wp.launch(_pack_colors, self.n, [self.colors, self.offsets, self.cursors, self.order, self.error], device=self.device)
+        if self.query_groups is not None:
+            self.query_groups.build(self.colors)
+            self.query_view = self.query_groups.view(self.current_color)
+        self._built = True
 
     def validate_independence(self):
         """Optional device check for tests/debugging of a candidate epoch."""
         c, m = self.contacts, self.model
-        if c.capacity:
+        if c is not None and c.capacity:
             wp.launch(_check_contacts, c.fast_workers,
                 [m.tri_indices, m.edge_indices, c.info, c.candidate_ids, c.candidate_count,
                  self.colors, c.fast_workers, c.error], device=self.device)
 
     def sweep(self, body):
-        if self.query_view is None:
+        if not self._built:
             raise RuntimeError("Rebuild contact-aware GS before its first sweep")
-        wp.launch(_begin_color, 1, [self.current_color, self.condition, self.metadata, self.contacts.error], device=self.device)
+        wp.launch(_begin_color, 1, [self.current_color, self.condition, self.metadata, self.error], device=self.device)
         def color_body():
             body()
-            wp.launch(_next_color, 1, [self.current_color, self.condition, self.metadata, self.contacts.error], device=self.device)
+            wp.launch(_next_color, 1, [self.current_color, self.condition, self.metadata, self.error], device=self.device)
         wp.capture_while(self.condition, color_body)
 
     def solve_elasticity(self, solver, state_in, dt):
@@ -1222,6 +937,62 @@ class GsSchedule:
 
 # Newton timestep integration.
 
+@wp.kernel(module="unique", enable_backward=False)
+def _validate_unrestricted_state(q: wp.array[wp.vec3], inertia: wp.array[wp.vec3], error: wp.array[int]):
+    vertex = wp.tid()
+    for axis in range(3):
+        if not wp.isfinite(q[vertex][axis]) or not wp.isfinite(inertia[vertex][axis]):
+            wp.atomic_max(error, 0, 3)
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _predict_unrestricted_velocity(q: wp.array[wp.vec3], previous: wp.array[wp.vec3],
+        velocity: wp.array[wp.vec3], flags: wp.array[int], mass: wp.array[float],
+        dt: float, fraction: float, error: wp.array[int]):
+    vertex = wp.tid()
+    target = q[vertex]
+    if flags[vertex] & 1 != 0 and mass[vertex] > 0.0:
+        target = previous[vertex] + fraction * (dt * velocity[vertex])
+    valid = True
+    for axis in range(3):
+        if not wp.isfinite(q[vertex][axis]) or not wp.isfinite(previous[vertex][axis]) or not wp.isfinite(target[axis]):
+            valid = False
+    if not valid:
+        wp.atomic_max(error, 0, 302)
+    elif error[0] == 0:
+        q[vertex] = target
+
+
+@wp.kernel(module="unique", enable_backward=False)
+def _publish_unrestricted_proposals(q: wp.array[wp.vec3], proposals: wp.array[wp.vec3],
+        flags: wp.array[int], mass: wp.array[float], colors: wp.array[int], color: int,
+        current_color: wp.array[int], device_selected: int, error: wp.array[int]):
+    vertex = wp.tid()
+    selected = color
+    if device_selected != 0:
+        selected = current_color[0]
+    if error[0] == 0 and flags[vertex] & 1 != 0 and mass[vertex] > 0.0 and colors[vertex] == selected:
+        target = proposals[vertex]
+        valid = True
+        for axis in range(3):
+            if not wp.isfinite(q[vertex][axis]) or not wp.isfinite(target[axis]):
+                valid = False
+        if valid:
+            q[vertex] = target
+        else:
+            wp.atomic_max(error, 0, 3)
+
+
+def _step_without_collisions(self, state_in, state_out, control, contacts, dt, *, observables=None):
+    # Keep the disabled mode closed even if callers attach a pipeline or supply
+    # contacts after construction. The inherited material timestep is unchanged.
+    self.collision_pipeline = None
+    self._pipeline_contacts = None
+    self.particle_enable_self_contact = False
+    self.rigid_soft_enable_dat = False
+    return SolverVBD.step(self, state_in, state_out, control, None, dt, observables=observables)
+
+
 class SolverIPC(SolverVBD):
     """Our GS/IPC/CCD model plugged into the authors' concrete GPU solver.
 
@@ -1232,7 +1003,11 @@ class SolverIPC(SolverVBD):
     """
 
     def __init__(self, model: Model, *, iterations=None, vertex_contact_capacity=128,
-                 edge_contact_capacity=256, allow_cpu=False):
+                 edge_contact_capacity=256, allow_cpu=False, enable_collisions=True):
+        if not isinstance(enable_collisions, bool):
+            raise TypeError("enable_collisions must be a bool")
+        if not enable_collisions and model.body_count:
+            raise ValueError("Collision-disabled GS currently supports deformables only")
         if not hasattr(model, "ipc"):
             raise TypeError("Build the actual Newton Model with gpu.scene.create_model")
         if not model.device.is_cuda and not allow_cpu:
@@ -1253,10 +1028,11 @@ class SolverIPC(SolverVBD):
         self.error = wp.zeros(1, int, device=model.device)
         self._failed = False
         self.params = p
+        self.enable_collisions = enable_collisions
         self._contact_aware_gs = bool(p.get("contact_aware_gs", True)) and model.body_count == 0 and model.particle_count > 0
         self._box_radius = float(p["node_box_max"])
-        self._adaptive_node_boxes = bool(p.get("adaptive_node_boxes", True))
-        self.movement_boxes = MovementBoxes(model, p["node_box_min"], p["node_box_max"])
+        self._adaptive_node_boxes = enable_collisions and bool(p.get("adaptive_node_boxes", True))
+        self.movement_boxes = MovementBoxes(model, p["node_box_min"], p["node_box_max"]) if enable_collisions else None
         # The detector queries current geometry. Cover both primitives' full
         # coordinatewise blue-box budgets until the next detection checkpoint.
         self._query_radius = max(float(p["d_hat"]), 1e-8) + 2.0 * self._box_radius
@@ -1265,7 +1041,7 @@ class SolverIPC(SolverVBD):
         if isinstance(base_iterations, bool) or not isinstance(base_iterations, int) or base_iterations < 0:
             raise ValueError("iterations must be a nonnegative integer")
         super().__init__(model, iterations=base_iterations,
-            particle_enable_self_contact=True,
+            particle_enable_self_contact=enable_collisions,
             particle_self_contact_margin=max(float(p["d_hat"]), 1e-8),
             particle_self_contact_gap=self._query_radius-max(float(p["d_hat"]), 1e-8),
             particle_vertex_contact_buffer_size=vertex_contact_capacity,
@@ -1274,56 +1050,103 @@ class SolverIPC(SolverVBD):
             particle_rest_shape_contact_exclusion_radius=0.0,
             particle_enable_tile_solve=True,
             rigid_soft_enable_dat=False,
-            collision_frequency_type={SolverBase.CollisionSlot.SOFT_SELF_CONTACT: SolverBase.CollisionFrequencyType.ITERATIONS},
+            collision_frequency_type=({SolverBase.CollisionSlot.SOFT_SELF_CONTACT: SolverBase.CollisionFrequencyType.ITERATIONS}
+                if enable_collisions else {slot: SolverBase.CollisionFrequencyType.NONE for slot in SolverBase.CollisionSlot}),
             collision_frequency={SolverBase.CollisionSlot.SOFT_SELF_CONTACT: int(p["node_box_update_count"])},
             enable_fast_math=False)
+        if not enable_collisions:
+            self.step = _step_without_collisions.__get__(self, type(self))
         self._prepare_material_banks()
         self.proposals = wp.empty_like(model.particle_q)
-        from .contact import ContactBackendIPC
-        self.contact_backend = ContactBackendIPC(model, self.trimesh_collision_info,
-            grouped_precision=p.get("gs_contact_precision", "float32"), energy_model="dat",
-            d_hat=float(p["d_hat"]), k_barrier=float(p["k_barrier"]),
-            friction=float(p["friction_coefficient"]), eps_v=float(p["friction_velocity_epsilon"]),
-            exact_geometry=bool(p["exact_computation_fallback"]), node_body=model.ipc.node_body, error=self.error,
-            track_query_epoch=bool(self._contact_aware_gs or p.get("use_colored_ccd_guess", False) or
-                                   p.get("use_colored_ccd_guess_level_based", False)))
-        self.ccd_backend = CcdBackend(self.contact_backend, node_box_radius=self._box_radius,
-            exact_geometry=bool(p["exact_computation_fallback"]), error=self.error, group_query_block_dim=64)
-        self.ccd_backend.single_vertex_filter = bool(p.get("gs_ccd_filter", True))
-        if not self.ccd_backend.exact_step_bound:
-            from .ccd import resolve_cached
-            self.ccd_backend._resolve = resolve_cached
+        self.contact_backend = None
+        self.ccd_backend = None
+        if enable_collisions:
+            from .contact import ContactBackendIPC
+            self.contact_backend = ContactBackendIPC(model, self.trimesh_collision_info,
+                grouped_precision=p.get("gs_contact_precision", "float32"), energy_model="dat",
+                d_hat=float(p["d_hat"]), k_barrier=float(p["k_barrier"]),
+                friction=float(p["friction_coefficient"]), eps_v=float(p["friction_velocity_epsilon"]),
+                exact_geometry=bool(p["exact_computation_fallback"]), node_body=model.ipc.node_body, error=self.error,
+                track_query_epoch=bool(self._contact_aware_gs or p.get("use_colored_ccd_guess", False) or
+                                       p.get("use_colored_ccd_guess_level_based", False)))
+            self.ccd_backend = CcdBackend(self.contact_backend, node_box_radius=self._box_radius,
+                exact_geometry=bool(p["exact_computation_fallback"]), error=self.error, group_query_block_dim=64)
+            self.ccd_backend.single_vertex_filter = bool(p.get("gs_ccd_filter", True))
+            if not self.ccd_backend.exact_step_bound:
+                from .ccd import resolve_cached
+                self.ccd_backend._resolve = resolve_cached
         flags = model.particle_flags.numpy()
         has_dynamic_particles = bool(np.any((flags & 1) & (model.particle_mass.numpy() > 0)))
-        self._guess_requested = has_dynamic_particles and bool(p.get("use_colored_ccd_guess", False) or
+        requested_predictor = has_dynamic_particles and bool(p.get("use_colored_ccd_guess", False) or
             p.get("use_colored_ccd_guess_level_based", False) or
             (p.get("use_ccd_guess", False) and not model.ipc.payload.get("uses_general_solver", False) and model.body_count == 0))
+        self._guess_requested = enable_collisions and requested_predictor
+        self._unrestricted_guess = not enable_collisions and requested_predictor
+        self._unrestricted_guess_fraction = 1.0
+        if self._unrestricted_guess:
+            colored = bool(p.get("use_colored_ccd_guess", False))
+            level = bool(p.get("use_colored_ccd_guess_level_based", False))
+            if colored and level:
+                raise ValueError("Choose one colored CCD predictor")
+            if colored or level:
+                sweeps = p.get("colored_ccd_guess_iters", 0)
+                fraction = p.get("colored_ccd_guess_fraction", 1.0)
+                if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 0:
+                    raise ValueError("Colored CCD sweeps must be a nonnegative integer")
+                if isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
+                    raise ValueError("Colored CCD fraction must be in [0,1]")
+                self._unrestricted_guess = sweeps > 0
+                self._unrestricted_guess_fraction = float(fraction)
+            elif model.tet_count:
+                # The existing global predictor is disabled for solid meshes.
+                self._unrestricted_guess = False
         if self._guess_requested:
             self.ccd_backend.prepare_initial_guess(self.trimesh_collision_detector, self.params, use_group_queries=True,
-                independent_colors=bool(p.get("use_colored_ccd_guess", False))
-                    and not p.get("use_colored_ccd_guess_level_based", False) and model.body_count == 0)
+                independent_colors=bool(p.get("use_colored_ccd_guess", False)
+                    or p.get("use_colored_ccd_guess_level_based", False)) and model.body_count == 0)
             graph = self.ccd_backend._initial_guess.graph
             if graph is not None:
                 graph.prepare_parallel_colors(ParallelColors(graph))
                 if p.get("use_colored_ccd_guess_level_based", False):
                     graph.prepare_parallel_levels(ParallelLevels(graph))
-        self.sdf_backend = SdfBackend(model, self.error)
+        self.sdf_backend = SdfBackend(model, self.error) if enable_collisions else None
         self.configuration = {
             "algorithm": "project GS schedule and CCD acceptance",
             "energy_membrane": {"force": "corotated", "hessian": "native PSD approximation",
                                 "singular_geometry": "native area-ratio floor"},
             "energy_bending": {"evaluator": "native with stiffness mapping", "degeneracy": "native guards"},
             "energy_solid": "shared corotated force and frozen-rotation PSD Hessian",
-            "energy_contact": dict(self.contact_backend.configuration),
+            "energy_contact": dict(self.contact_backend.configuration) if enable_collisions else {"enabled": False},
             "energy_sdf": {"precision": self.sdf_backend.precision,
                            "include_curvature": bool(self.sdf_backend.params.include_curvature),
                            "normal_hessian": "full spatial curvature" if self.sdf_backend.params.include_curvature else "PSD normal outer product",
                            "geometry": "float32 with binary64 replay" if self.sdf_backend.precision == "float32" else "binary64",
                            "material_transport": "binary64",
-                           "friction_hessian": "frozen tangent PSD; zero at zero slip"},
+                           "friction_hessian": "frozen tangent PSD; zero at zero slip"} if enable_collisions else {"enabled": False},
             "rigid_contact_hessian": "frozen contact geometry and Jacobian PSD pullback",
             "local_solve": "project rank-revealing solve and configured damping",
         }
+        self.configuration.update({
+            "enable_collisions": enable_collisions,
+            "collision_processing": enable_collisions,
+            "mesh_collision_detection": enable_collisions,
+            "ccd_enabled": enable_collisions and bool(p["use_ccd"]),
+            "ccd_precision": "float32",
+            "ccd_uncertain_policy": "conservative backtracking; no higher-precision fallback",
+            "predictor_ccd_enabled": self._guess_requested,
+            "movement_bounds_enabled": enable_collisions,
+            "planar_dat_enabled": False,
+            "gs_schedule": ("project material/contact GS colors" if enable_collisions else "project material-only GS colors")
+                if self._contact_aware_gs else "stock material colors with project GS equations",
+        })
+        if not enable_collisions:
+            self.configuration.update({
+                "algorithm": "project GS with all collision processing disabled",
+                "predictor": "unrestricted velocity prediction" if self._unrestricted_guess else "step-start positions",
+                "predictor_fraction": self._unrestricted_guess_fraction if self._unrestricted_guess else None,
+                "motion_acceptance": "unrestricted project GS proposals",
+                "rigid_contact_hessian": None,
+            })
         include_tets = model.tet_count > 0
         include_triangles = bool(np.any(model.ipc.tri_active.numpy())) or bool(np.any(model.ipc.edge_active.numpy()))
         self._ipc_particles_per_block = 1 if include_tets else 2
@@ -1337,7 +1160,9 @@ class SolverIPC(SolverVBD):
         self._box_filter = None
         self.skip_empty_mesh_contacts = True
         if self._contact_aware_gs:
-            self._gs_schedule = GsSchedule(self.contact_backend)
+            self._gs_schedule = GsSchedule(self.contact_backend, model=model, error=self.error)
+            if not enable_collisions:
+                self._gs_schedule.rebuild()
             if self._adaptive_node_boxes and p.get("gs_prune_box_contacts", True):
                 from .movement_box_queries import GsBoxEpochFilter
                 self._box_filter = GsBoxEpochFilter(self.contact_backend)
@@ -1403,18 +1228,29 @@ class SolverIPC(SolverVBD):
                     state_in.particle_f, m.particle_flags],
             outputs=[self.inertia, self.particle_displacements], device=self.device)
         self.particle_displacements.zero_()
-        self.sdf_backend.prepare(dt)
+        if self.enable_collisions:
+            self.sdf_backend.prepare(dt)
+        else:
+            wp.launch(_validate_unrestricted_state, m.particle_count,
+                [state_in.particle_q, self.inertia, self.error], device=self.device)
         if self._guess_requested:
             self.ccd_backend.initial_guess(state_in.particle_q, self.particle_q_prev,
                 state_in.particle_qd, self.inertia, dt, self.params, detector=self.trimesh_collision_detector)
+        elif self._unrestricted_guess:
+            wp.launch(_predict_unrestricted_velocity, m.particle_count,
+                [state_in.particle_q, self.particle_q_prev, state_in.particle_qd,
+                 m.particle_flags, m.particle_mass, dt, self._unrestricted_guess_fraction, self.error], device=self.device)
         if self._adaptive_node_boxes:
             self.movement_boxes.anchor(state_in.particle_q)
-        self._collision_detection_penetration_free(state_in, reset_reference=True)
+        if self.enable_collisions:
+            self._collision_detection_penetration_free(state_in, reset_reference=True)
         if self.iterations == 0:
             # Ordinarily the inherited color loop publishes the final iterate.
             wp.copy(state_out.particle_q, state_in.particle_q)
 
     def _collision_detection_penetration_free(self, current_state: State, *, reset_reference=True):
+        if not self.enable_collisions:
+            return
         if reset_reference:
             self.pos_prev_collision_detection.assign(current_state.particle_q)
             self.particle_displacements.zero_()
@@ -1438,7 +1274,7 @@ class SolverIPC(SolverVBD):
             self._gs_schedule.rebuild()
 
     def _self_contact_is_due(self, iter_num):
-        return iter_num > 0 and iter_num % int(self.params["node_box_update_count"]) == 0
+        return self.enable_collisions and iter_num > 0 and iter_num % int(self.params["node_box_update_count"]) == 0
 
     def _solve_particle_iteration(self, state_in, state_out, contacts, dt):
         self._refresh_material_banks()
@@ -1447,6 +1283,16 @@ class SolverIPC(SolverVBD):
             return super()._solve_particle_iteration(state_in, state_out, contacts, dt)
         self.particle_forces.zero_()
         self.particle_hessians.zero_()
+
+        if not self.enable_collisions:
+            def material_color():
+                gs.solve_elasticity(self, state_in, dt)
+                wp.launch(_publish_unrestricted_proposals, self.model.particle_count,
+                    [state_in.particle_q, self.proposals, self.model.particle_flags, self.model.particle_mass,
+                     gs.colors, -1, gs.current_color, 1, self.error], device=self.device)
+            gs.sweep(material_color)
+            wp.copy(state_out.particle_q, state_in.particle_q)
+            return
 
         def color_body(include_mesh):
             if include_mesh:
@@ -1486,7 +1332,7 @@ class SolverIPC(SolverVBD):
         wp.copy(state_out.particle_q, state_in.particle_q)
 
     def _accumulate_particle_contact_terms(self, state_in, state_out, contacts, dt, color):
-        if not self._active_color_counts[color]:
+        if not self.enable_collisions or not self._active_color_counts[color]:
             return
         self.contact_backend.accumulate(state_in.particle_q, self.particle_q_prev, color,
                                        self.particle_forces, self.particle_hessians, dt)
@@ -1519,6 +1365,11 @@ class SolverIPC(SolverVBD):
     def _finish_particle_color(self, state_in, state_out, contacts, dt, color):
         if not self._active_color_counts[color]:
             return
+        if not self.enable_collisions:
+            wp.launch(_publish_unrestricted_proposals, self.model.particle_count,
+                [state_in.particle_q, self.proposals, self.model.particle_flags, self.model.particle_mass,
+                 self.model.particle_colors, color, None, 0, self.error], device=self.device)
+            return
         self.ccd_backend.accept(state_in.particle_q, self.proposals, color, dt,
                                 center=self.pos_prev_collision_detection, radius=self._box_radius,
                                 radii=self.movement_boxes.radii if self._adaptive_node_boxes else None,
@@ -1531,7 +1382,8 @@ class SolverIPC(SolverVBD):
 
     def reset(self, state, world_mask=None, flags=None):
         super().reset(state, world_mask=world_mask, flags=flags)
-        self.movement_boxes.reset(self._normalize_reset_world_mask(world_mask))
+        if self.movement_boxes is not None:
+            self.movement_boxes.reset(self._normalize_reset_world_mask(world_mask))
 
     def _initialize_rigid_bodies(self, state_in, control, contacts, dt, update_rigid):
         if self._rigid is not None:
@@ -1565,7 +1417,12 @@ class SolverIPC(SolverVBD):
             wp.synchronize_device(self.device)
             # All components share this latched error word. One download also
             # checks CCD; calling each backend would download it repeatedly.
-            self.contact_backend.check()
+            if self.enable_collisions:
+                self.contact_backend.check()
+            else:
+                code = int(self.error.numpy()[0])
+                if code:
+                    raise RuntimeError(f"IPC material GS failed with status {code}")
         except Exception:
             self._failed = True
             raise

@@ -3,9 +3,10 @@
 
 """Our material and IPC energies on native DAT execution and kernel layouts.
 
-Reference closest points, directed contact ownership, friction and PSD local
-solve matrices are reused with our corotated stress and scalar IPC barrier.
-Source guards and reversible substitutions protect the pinned native bodies.
+Cloth and solid material terms use the project's gradient and self-Hessian
+formulas. The native local inverse and kernel layout are retained. The separate
+native-contact adapter retains reference geometry/friction with our scalar IPC
+barrier; source guards protect those pinned native bodies.
 """
 
 import ast
@@ -367,7 +368,7 @@ _MEMBRANE_CLONE_NAME = "evaluate_corotated_force_native_hessian"
 
 
 def membrane_source():
-    """Return native source with only reversible corotated stress substitutions."""
+    """Legacy SolverIPC surrogate; VBD project materials use energy.triangle."""
     original = inspect.getsource(getattr(stock, _MEMBRANE_FUNCTION_NAME).func)
     digest = hashlib.sha256(original.encode()).hexdigest()
     if digest != _MEMBRANE_SOURCE_SHA256:
@@ -425,8 +426,22 @@ def evaluate_own_membrane_force_hessian(face:int,role:int,pos:wp.array[wp.vec3],
     own_lam=own_materials[face,1]
     if own_mu==0.0 and own_lam==0.0:
         return wp.vec3(0.0),wp.mat33(0.0)
-    return evaluate_corotated_force_native_hessian(
-        face,role,pos,pos_anchor,triangles,inverse,area,own_mu,own_lam,0.0,dt)
+    # Use the CPU project's gradient AND analytic self-Hessian; no PSD
+    # projection. Highly anisotropic F makes the polar derivatives cancel in
+    # FP32. Evaluate those cases in binary64 on the GPU, using the same formula.
+    p0,p1,p2=pos[triangles[face,0]],pos[triangles[face,1]],pos[triangles[face,2]]
+    a,b=p1-p0,p2-p0
+    f0=a*inverse[0,0]+b*inverse[1,0]
+    f1=a*inverse[0,1]+b*inverse[1,1]
+    trace=wp.length_sq(f0)+wp.length_sq(f1)
+    area_squared=wp.length_sq(wp.cross(f0,f1))
+    value=energy.Pack()
+    if (not wp.isfinite(trace) or not wp.isfinite(area_squared)
+            or area_squared<=1.e-6*trace*trace):
+        value=energy.triangle_reference(p0,p1,p2,inverse,area,own_mu,own_lam,role)
+    else:
+        value=energy.triangle(p0,p1,p2,inverse,area,own_mu,own_lam,role)
+    return energy.unpack(value)
 
 
 @wp.func
@@ -435,16 +450,27 @@ def evaluate_own_bending_force_hessian(edge:int,role:int,pos:wp.array[wp.vec3],p
     viscous_damping:float,dt:float,coefficients:wp.array[float],own_stiffness:wp.array[float]):
     if edges[edge,0]<0 or edges[edge,1]<0 or own_stiffness[edge]<=0.0 or coefficients[edge]<=0.0:
         return wp.vec3(0.0),wp.mat33(0.0)
-    rest_length=rest_lengths[edge]
-    if not wp.isfinite(rest_length) or rest_length<=0.0:
-        return wp.vec3(0.0),wp.mat33(0.0)
-    mapped_stiffness=((2.0*own_stiffness[edge])*coefficients[edge])/rest_length
-    if not wp.isfinite(mapped_stiffness) or mapped_stiffness<=0.0:
-        return wp.vec3(0.0),wp.mat33(0.0)
-    # Native E=(ke*L0/2)*delta_theta^2; ours E=kB*c_e*delta_theta^2.
-    # Delegate geometry, degeneracy guards and the PSD Hessian to native DAT.
-    return stock.evaluate_dihedral_angle_based_bending_force_hessian(
-        edge,role,pos,pos_anchor,edges,rest_angles,rest_lengths,mapped_stiffness,0.0,dt)
+    # Newton stores [oppositeA, oppositeB, edge0, edge1]; the project uses
+    # [edge0, edge1, oppositeA, oppositeB]. Its own bending Hessian is the
+    # rank-one Gauss-Newton block, not the full second derivative of theta.
+    project_role=role+2
+    if role>=2:
+        project_role=role-2
+    p0,p1,p2,p3=pos[edges[edge,2]],pos[edges[edge,3]],pos[edges[edge,0]],pos[edges[edge,1]]
+    e,a,b=p1-p0,p2-p0,p3-p0
+    edge_squared=wp.length_sq(e)
+    extent_squared=wp.max(wp.length_sq(a),wp.length_sq(b))
+    normal_squared=wp.min(wp.length_sq(wp.cross(e,a)),wp.length_sq(wp.cross(b,e)))
+    value=energy.Pack()
+    if (not wp.isfinite(extent_squared) or not wp.isfinite(normal_squared)
+            or edge_squared<=1.e-6*extent_squared
+            or normal_squared<=1.e-6*edge_squared*extent_squared):
+        value=energy.hinge_reference(p0,p1,p2,p3,coefficients[edge],
+            rest_angles[edge],own_stiffness[edge],project_role)
+    else:
+        value=energy.hinge(p0,p1,p2,p3,coefficients[edge],
+            rest_angles[edge],own_stiffness[edge],project_role)
+    return energy.unpack(value)
 
 
 @wp.func

@@ -3,7 +3,7 @@
 Each candidate is copied once to every distinct nonnegative corner group. Therefore
 one group owns at most the original candidate count, and all groups together
 need at most four copies per candidate. Values retain Newton's original
-encoded candidate IDs; the existing CCD exact resolver can decode them without
+encoded candidate IDs; the FP32 CCD resolver can decode them without
 any numerical or kernel change. No force, geometry or accepted fraction is
 cached here.
 """
@@ -15,7 +15,7 @@ import warp as wp
 from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
 
 from .contact import decode_candidate, _same_body
-from .ccd import round_inside, pair_certificate, configure_module as _configure_ccd
+from .ccd import round_inside, radius_float32, pair_certificate, configure_module as _configure_ccd
 
 
 @wp.kernel
@@ -75,7 +75,7 @@ def compact_rows_epoch(info: TriMeshCollisionInfo, triangles: wp.array2d[int], e
 
 @wp.kernel
 def prepare_grouped(q: wp.array[wp.vec3], proposed: wp.array[wp.vec3], center: wp.array[wp.vec3],
-              radius: wp.float64, radii: wp.array[wp.float64], use_radii: int,
+              radius: float, radii: wp.array[wp.float64], use_radii: int,
               bounded: int, colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
               color: int, view_groups: wp.array[int], current_group: wp.array[int], use_view: int, select_group: int,
               view_epoch: wp.array[wp.uint64], current_epoch: wp.array[wp.uint64],
@@ -95,7 +95,7 @@ def prepare_grouped(q: wp.array[wp.vec3], proposed: wp.array[wp.vec3], center: w
         if bounded != 0 and changed:
             budget = radius
             if use_radii != 0:
-                budget = radii[i]
+                budget = radius_float32(radii[i])
             point = round_inside(q[i], point, center[i], budget)
         for k in range(3):
             if not wp.isfinite(q[i][k]) or not wp.isfinite(point[k]):

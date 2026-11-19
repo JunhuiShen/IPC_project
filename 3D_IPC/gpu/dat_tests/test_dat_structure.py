@@ -155,15 +155,6 @@ def own_terms(q:wp.array[wp.vec3],triangles:wp.array2d[int],inverse:wp.mat22,are
               mu:float,lam:float,targets:wp.array[wp.vec3],kpin:float,
               triangle:wp.array[energy.Pack],pin_f:wp.array[wp.vec3],pin_h:wp.array[wp.mat33]):
     value=energy.triangle(q[triangles[0,0]],q[triangles[0,1]],q[triangles[0,2]],inverse,area,mu,lam,0)
-    # The force remains the gradient of our corotated energy. The local solve
-    # uses the native PSD Hessian as a quasi-Newton approximation to that energy.
-    native_h=wp.mat33(0.0)
-    if mu!=0.0 or lam!=0.0:
-        native_f,native_h=stock.evaluate_neo_hookean_membrane_force_hessian(
-            0,0,q,q,triangles,inverse,area,mu,lam,0.0,.1)
-    for row in range(3):
-        for column in range(3):
-            value[3+3*row+column]=native_h[row,column]
     triangle[0]=value
     f,h=energies.evaluate_own_pin_force_hessian(0,q,targets,kpin)
     pin_f[0]=f;pin_h[0]=h
@@ -263,7 +254,7 @@ class StrictDatStructureTests(unittest.TestCase):
         np.testing.assert_allclose(out.particle_q.numpy(),expected,rtol=2e-6,atol=2e-8)
         self.assertEqual(before,fingerprint(model))
 
-    def test_triangle_and_pin_full_step_matches_own_force_native_hessian_local_system(self):
+    def test_triangle_and_pin_full_step_matches_project_derivative_local_system(self):
         model=model_fixture(mu=9.,lam=13.,pin=40.)
         solver=SolverDAT(model,iterations=1,allow_cpu=True,particle_enable_self_contact=False,enable_fast_math=False)
         state,out=model.state(),model.state()
