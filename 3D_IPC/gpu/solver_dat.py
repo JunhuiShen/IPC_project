@@ -24,6 +24,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 from . import select_newton_runtime
+from .ccd_defaults import LINEAR_CCD_GAP_FLOOR
 
 select_newton_runtime('reference')
 
@@ -228,7 +229,8 @@ class SolverDAT(SolverVBD):
                  vertex_contact_capacity=None,edge_contact_capacity=None,
                  contact_precision='float32',enable_planar_dat=True,enable_broad_phase_boxes=False,
                  enable_barrier_coloring=False,enable_color_ccd=False,
-                 enable_color_ccd_contact_forces=False,color_ccd_method='direct_rounding',local_solve='native',local_solve_damping=None,**stock_options):
+                 enable_color_ccd_contact_forces=False,color_ccd_method='direct_rounding',
+                 color_ccd_accept_uncertified=False,local_solve='native',local_solve_damping=None,**stock_options):
         if local_solve not in ('native','cpu_fp32'):
             raise ValueError("local_solve must be 'native' or 'cpu_fp32'")
         self.local_solve=local_solve
@@ -236,6 +238,10 @@ class SolverDAT(SolverVBD):
             raise ValueError('color_ccd_method must be direct_rounding or plane')
         if color_ccd_method != 'direct_rounding' and not enable_color_ccd:
             raise ValueError('color_ccd_method=plane requires enable_color_ccd=True')
+        if not isinstance(color_ccd_accept_uncertified, bool):
+            raise TypeError('color_ccd_accept_uncertified must be a bool')
+        if color_ccd_accept_uncertified and (not enable_color_ccd or color_ccd_method != 'plane'):
+            raise ValueError("color_ccd_accept_uncertified requires enable_color_ccd=True and color_ccd_method='plane'")
         if not isinstance(enable_color_ccd_contact_forces,bool):
             raise TypeError('enable_color_ccd_contact_forces must be a bool')
         if enable_color_ccd_contact_forces and not enable_color_ccd:
@@ -322,9 +328,10 @@ class SolverDAT(SolverVBD):
         self.color_contact_forces=None
         if enable_broad_phase_boxes:
             from .broad_phase_boxes import BroadPhaseBoxes
+            reach = max(self._energy_dhat, LINEAR_CCD_GAP_FLOOR) if enable_color_ccd else self._energy_dhat
             self.broad_phase_boxes=BroadPhaseBoxes(model,self.error,
                 minimum=p.get('node_box_min',.001),maximum=p.get('node_box_max',.01),
-                d_hat=self._energy_dhat,update_interval=p.get('node_box_update_count',10))
+                d_hat=reach,update_interval=p.get('node_box_update_count',10))
             self._box_iteration=0
             self._initialize_particles=_initialize_with_boxes.__get__(self,type(self))
             self._solve_particle_iteration=_solve_iteration_with_boxes.__get__(self,type(self))
@@ -357,7 +364,7 @@ class SolverDAT(SolverVBD):
             if enable_color_ccd:
                 from .dat_color_ccd import ColorCcd
                 self.color_ccd=ColorCcd(model,self.broad_phase_boxes,self.barrier_coloring,self.error,
-                                        method=color_ccd_method)
+                                        method=color_ccd_method, accept_uncertified=color_ccd_accept_uncertified)
                 if enable_color_ccd_contact_forces:
                     from .dat_color_contacts import ColorContactForces
                     self.color_contact_forces=ColorContactForces(
@@ -471,9 +478,11 @@ class SolverDAT(SolverVBD):
         self.configuration['color_ccd']={'enabled':enable_color_ccd}
         if enable_color_ccd:
             self.configuration['color_ccd'].update({
-                'method':color_ccd_method,'precision':'float32','gap_floor':1e-8,
+                'method':color_ccd_method,'precision':'float32','gap_floor':LINEAR_CCD_GAP_FLOOR,
                 'reduction':'per-vertex atomic minimum over all incident current-color pairs',
-                'uncertain_policy':'rounded-endpoint certificate or stationary update',
+                'accept_uncertified':color_ccd_accept_uncertified,
+                'uncertain_policy':('publish the box-clamped proposal when CCD leaves the vertex stationary'
+                    if color_ccd_accept_uncertified else 'rounded-endpoint certificate or stationary update'),
                 'publication':'only current color; accepted reference rebased and rejected displacement discarded'})
             self.configuration['collision_processing']=True
             self.configuration['solver_collision_processing']=True
@@ -482,6 +491,8 @@ class SolverDAT(SolverVBD):
             self.configuration['broad_phase_boxes']['bounds_enforced']=True
             self.configuration['algorithm']='native VBD material/local solve with combined coloring and independent per-color CCD'
             self.configuration['motion_acceptance']='blue-box clamp, per-vertex pairwise CCD minimum, endpoint certificate, current-color publication'
+            if color_ccd_accept_uncertified:
+                self.configuration['motion_acceptance']+='; accept uncertified box-clamped update if CCD stalls'
             if not self._guess_requested:
                 self.configuration['predictor']='stationary step-start positions; native gravity-inclusive inertia retained'
         self.configuration['color_ccd_contact_forces']={'enabled':enable_color_ccd_contact_forces}

@@ -63,7 +63,7 @@ class GsBoxFilterTests(unittest.TestCase):
         axis = [Fraction(float(x)) for x in packet[1:4]]
         required = Fraction(float(packet[4]))
         scale = max(Fraction(abs(float(x))) for x in np.r_[lower.ravel(), upper.ravel()])
-        floor = max(Fraction(1e-8), Fraction(1e-10), Fraction(128 * np.finfo(np.float64).eps) * scale)
+        floor = max(Fraction(float(np.float32(1e-7))), Fraction(128 * np.finfo(np.float64).eps) * scale)
         self.assertGreaterEqual(required, max(Fraction(radius), Fraction(ceil_f32(radius))) + floor)
         projected = []
         for lo, hi in zip(lower, upper):
@@ -112,7 +112,7 @@ class GsBoxFilterTests(unittest.TestCase):
                         [[.25, .25, .05], [0, 0, 0], [1, 0, 0], [0, 1, 0]],
                         [[0, 0, 0], [1, 1, 0], [0, .001, 0], [1, 1.001, 0]]], np.float32)
         lo, hi = bounds(q, np.asarray([.0001, .05, .001])[:, None])
-        threshold = ceil_f32(.002) + 1e-8
+        threshold = ceil_f32(.002) + float(np.float32(1e-7))
         low = np.float32(threshold)
         if float(low) > threshold:
             low = np.nextafter(low, np.float32(-np.inf))

@@ -36,6 +36,7 @@ from newton._src.utils.mesh import (
 
 from . import energy
 from .ccd import CcdBackend
+from .ccd_defaults import LINEAR_CCD_GAP_FLOOR
 from .contact import decode_candidate
 from .query_groups import QueryGroups
 from .sdf import SdfBackend
@@ -1030,20 +1031,33 @@ class SolverIPC(SolverVBD):
         self.params = p
         self.enable_collisions = enable_collisions
         self._contact_aware_gs = bool(p.get("contact_aware_gs", True)) and model.body_count == 0 and model.particle_count > 0
+        accept_uncertified = p.get("gs_ccd_accept_uncertified", False)
+        if not isinstance(accept_uncertified, bool):
+            raise TypeError("gs_ccd_accept_uncertified must be a bool")
+        if accept_uncertified and not (enable_collisions and p["use_ccd"] and self._contact_aware_gs):
+            raise ValueError("Uncertified CCD fallback requires contact-aware deformable GS with CCD enabled")
+        self._unclipped_ccd_proposals = wp.empty_like(model.particle_q) if accept_uncertified else None
+        guess_accept_uncertified = p.get("gs_ccd_guess_accept_uncertified", False)
+        if not isinstance(guess_accept_uncertified, bool):
+            raise TypeError("gs_ccd_guess_accept_uncertified must be a bool")
+        if guess_accept_uncertified and not (
+                enable_collisions and model.body_count == 0 and p.get("use_colored_ccd_guess_level_based", False)):
+            raise ValueError("Uncertified predictor fallback requires deformable GS with level-based CCD enabled")
         self._box_radius = float(p["node_box_max"])
         self._adaptive_node_boxes = enable_collisions and bool(p.get("adaptive_node_boxes", True))
         self.movement_boxes = MovementBoxes(model, p["node_box_min"], p["node_box_max"]) if enable_collisions else None
         # The detector queries current geometry. Cover both primitives' full
         # coordinatewise blue-box budgets until the next detection checkpoint.
-        self._query_radius = max(float(p["d_hat"]), 1e-8) + 2.0 * self._box_radius
+        contact_reach = max(float(p["d_hat"]), LINEAR_CCD_GAP_FLOOR)
+        self._query_radius = contact_reach + 2.0 * self._box_radius
         self._query_radius += 32.0 * np.finfo(np.float32).eps * max(1.0, self._query_radius)
         base_iterations = p["max_global_iters"] if iterations is None else iterations
         if isinstance(base_iterations, bool) or not isinstance(base_iterations, int) or base_iterations < 0:
             raise ValueError("iterations must be a nonnegative integer")
         super().__init__(model, iterations=base_iterations,
             particle_enable_self_contact=enable_collisions,
-            particle_self_contact_margin=max(float(p["d_hat"]), 1e-8),
-            particle_self_contact_gap=self._query_radius-max(float(p["d_hat"]), 1e-8),
+            particle_self_contact_margin=contact_reach,
+            particle_self_contact_gap=self._query_radius-contact_reach,
             particle_vertex_contact_buffer_size=vertex_contact_capacity,
             particle_edge_contact_buffer_size=edge_contact_capacity,
             particle_topological_contact_filter_threshold=0,
@@ -1081,6 +1095,8 @@ class SolverIPC(SolverVBD):
             p.get("use_colored_ccd_guess_level_based", False) or
             (p.get("use_ccd_guess", False) and not model.ipc.payload.get("uses_general_solver", False) and model.body_count == 0))
         self._guess_requested = enable_collisions and requested_predictor
+        if guess_accept_uncertified and (not self._guess_requested or p.get("colored_ccd_guess_iters", 0) == 0):
+            raise ValueError("Uncertified predictor fallback requires at least one level-based updating sweep")
         self._unrestricted_guess = not enable_collisions and requested_predictor
         self._unrestricted_guess_fraction = 1.0
         if self._unrestricted_guess:
@@ -1132,7 +1148,10 @@ class SolverIPC(SolverVBD):
             "mesh_collision_detection": enable_collisions,
             "ccd_enabled": enable_collisions and bool(p["use_ccd"]),
             "ccd_precision": "float32",
-            "ccd_uncertain_policy": "conservative backtracking; no higher-precision fallback",
+            "ccd_uncertain_policy": ("use the box-clamped proposal if GS CCD stalls"
+                                     if accept_uncertified else "conservative backtracking; no higher-precision fallback"),
+            "gs_ccd_accept_uncertified": accept_uncertified,
+            "gs_ccd_guess_accept_uncertified": guess_accept_uncertified,
             "predictor_ccd_enabled": self._guess_requested,
             "movement_bounds_enabled": enable_collisions,
             "planar_dat_enabled": False,
@@ -1256,7 +1275,8 @@ class SolverIPC(SolverVBD):
             self.particle_displacements.zero_()
         if self._adaptive_node_boxes and self._rigid is None:
             self.contact_backend.detect_boxes(self.trimesh_collision_detector,
-                current_state.particle_q, self.movement_boxes.radii, float(self.params["d_hat"]))
+                current_state.particle_q, self.movement_boxes.radii,
+                max(float(self.params["d_hat"]), LINEAR_CCD_GAP_FLOOR))
         else:
             # Rigid analytic motion retains its own conservative scalar reach.
             self.contact_backend.detect(self.trimesh_collision_detector, current_state.particle_q,
@@ -1308,7 +1328,8 @@ class SolverIPC(SolverVBD):
                 center=self.pos_prev_collision_detection, radius=self._box_radius,
                 radii=self.movement_boxes.radii if self._adaptive_node_boxes else None,
                 colors=gs.colors, current_color=gs.current_color, query_view=gs.query_view,
-                independent=True, bounded=True, clip_ccd=bool(self.params["use_ccd"]))
+                independent=True, bounded=True, clip_ccd=bool(self.params["use_ccd"]),
+                unclipped=self._unclipped_ccd_proposals)
 
         if self.skip_empty_mesh_contacts and self.device.is_cuda and self.device.is_capturing:
             # Check parameters even when the device branch skips mesh

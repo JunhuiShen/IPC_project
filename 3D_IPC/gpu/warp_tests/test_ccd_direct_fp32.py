@@ -312,7 +312,7 @@ class Float32DirectWarpTests(unittest.TestCase):
                         np.testing.assert_array_equal(actual[4], proposed[4])
                         self.assertEqual(int(backend.attempts.numpy()[0]), 1)
                         self.assertEqual(int(backend.verified.numpy()[0]), 1)
-                        cases.append((data.start[:4], actual[:4], int(edge), 1e-8))
+                        cases.append((data.start[:4], actual[:4], int(edge), 1e-7))
             self.assert_exact_committed(cases)
 
     def test_opt_in_backend_rejects_two_movers_before_any_commit(self):
@@ -370,14 +370,14 @@ class Float32DirectWarpTests(unittest.TestCase):
                     np.testing.assert_array_equal(actual[0], proposed[0])
                     self.assertEqual(float(backend.node_fractions.numpy()[0]), 1)
                 else:
-                    self.assertGreater(actual[0, 2], np.float32(1e-8))
+                    self.assertGreater(actual[0, 2], np.float32(1e-7))
                     self.assertLess(actual[0, 2], data.start[0, 2])
                 np.testing.assert_array_equal(actual[4], proposed[4])
                 np.testing.assert_array_equal(actual[1:4], data.start[1:4])
                 epoch = int(data.contacts.query_epoch.numpy()[0])
                 self.assertGreater(epoch, previous_epoch)
                 previous_epoch = epoch
-                cases.append((data.start[:4], actual[:4], 0, 1e-8))
+                cases.append((data.start[:4], actual[:4], 0, 1e-7))
             self.assert_exact_committed(cases)
 
     def test_shared_vertex_reduction_is_order_independent_and_recertifies_stored_endpoints(self):
@@ -439,7 +439,7 @@ class Float32DirectWarpTests(unittest.TestCase):
                         # few-ULP move, or endpoint verification may restore it.
                         # Safety and independent motion are the contract.
                         for nodes in ([0, 1, 2, 3], [0, 4, 5, 6]):
-                            cases.append((start[nodes], actual[nodes], 0, 1e-8))
+                            cases.append((start[nodes], actual[nodes], 0, 1e-7))
                         outputs.append(actual.copy())
                 np.testing.assert_array_equal(outputs[0], outputs[1])
             self.assert_exact_committed(cases)

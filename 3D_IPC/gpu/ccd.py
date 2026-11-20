@@ -103,7 +103,6 @@ _INPUT = r"""
             query.end[i][k]=proposed.data[nodes[i]][k];
         }
     }
-    query.gap_floor=1e-8f;
 """
 
 
@@ -209,6 +208,22 @@ def _commit(candidate: wp.array[wp.vec3], q: wp.array[wp.vec3], verified: wp.arr
         q[i] = candidate[i]
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def _restore_stalled_proposals(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3],
+                              unclipped: wp.array[wp.vec3], rejected: wp.array[int],
+                              has_rejections: bool, error: wp.array[int]):
+    i = wp.tid()
+    if error[0] == 0:
+        start = q[i]
+        point = candidate[i]
+        stalled = point[0] == start[0] and point[1] == start[1] and point[2] == start[2]
+        if stalled or (has_rejections and rejected[i] != 0):
+            # Preparation has validated the proposal and applied any movement bounds.
+            candidate[i] = unclipped[i]
+            if has_rejections:
+                rejected[i] = 0
+
+
 class CcdBackend:
     def __init__(self, contacts, *, node_box_radius=0.01, exact_geometry=True, max_rounds=128,
                  exact_step_bound=None, error=None, group_query_block_dim=32):
@@ -250,9 +265,16 @@ class CcdBackend:
         wp.copy(self.reference, q)
 
     def accept(self, q, proposed, color, dt, *, center=None, radius=None, bounded=True, colors=None, preserve_gap=False,
-               clip_ccd=True, query_view=None, radii=None, current_color=None, independent=False):
+               clip_ccd=True, query_view=None, radii=None, current_color=None, independent=False,
+               unclipped=None):
         if q.dtype != wp.vec3 or proposed.dtype != wp.vec3 or q.shape != proposed.shape:
             raise TypeError("CCD requires matching upstream float32 particle arrays")
+        if unclipped is not None:
+            if not (independent and clip_ccd):
+                raise ValueError("Uncertified CCD fallback requires independent CCD updates")
+            if (unclipped.dtype != wp.vec3 or unclipped.shape != q.shape or unclipped.device != self.device
+                    or unclipped.ptr in (q.ptr, proposed.ptr, self.candidate.ptr)):
+                raise ValueError("Uncertified CCD fallback requires separate float32 proposal storage")
         radius = self.radius if radius is None else radius
         if not math.isfinite(radius) or radius <= 1.0e-10:
             raise ValueError("Invalid CCD movement radius")
@@ -297,6 +319,8 @@ class CcdBackend:
             self.verified.fill_(1)
             wp.launch(_commit, q.shape[0], [self.candidate, q, self.verified, self.error], device=self.device)
             return q
+        if unclipped is not None:
+            wp.copy(unclipped, self.candidate)
         if self.method != "interval":
             propose, verify, publish = get_plane_kernels(self.method)
             self.node_fractions.fill_(1.0)
@@ -316,6 +340,9 @@ class CcdBackend:
             # certificates for other moving vertices in this group.
             self.attempts.fill_(1)
             self.verified.fill_(1)
+            if unclipped is not None:
+                wp.launch(_restore_stalled_proposals, q.shape[0],
+                          [q, self.candidate, unclipped, self.plane_rejected, True, self.error], device=self.device)
             wp.launch(publish, q.shape[0], [q, self.candidate, self.plane_rejected, self.error], device=self.device)
             return q
         wp.launch(_begin, 1, [self.condition, self.attempts, self.verified, self.error], device=self.device)
@@ -362,6 +389,9 @@ class CcdBackend:
                 [self.condition, self.attempts, self.verified, self.fraction, self.max_rounds, self.error], device=self.device)
 
         wp.capture_while(self.condition, round_body)
+        if unclipped is not None:
+            wp.launch(_restore_stalled_proposals, q.shape[0],
+                      [q, self.candidate, unclipped, None, False, self.error], device=self.device)
         wp.launch(_commit, q.shape[0], [self.candidate, q, self.verified, self.error], device=self.device)
         return q
 
@@ -686,5 +716,5 @@ def __getattr__(name):
 
 
 # Fast kernels share this source file but never a cold compilation unit.
-for _kernel in (_prepare, _begin, _begin_round, _certify, _shorten, _next, _commit):
+for _kernel in (_prepare, _begin, _begin_round, _certify, _shorten, _next, _commit, _restore_stalled_proposals):
     configure_module(_kernel, mode="fast")

@@ -241,6 +241,7 @@ def run(arguments, *, enable_collision_pipeline=True):
 def run_own(arguments, *, enable_planar_dat=True, enable_broad_phase_boxes=False,
             enable_barrier_coloring=False, enable_color_ccd=False,
             enable_color_ccd_contact_forces=False,color_ccd_method="direct_rounding",
+            color_ccd_accept_uncertified=False,
             vertex_contact_capacity=None, edge_contact_capacity=None,
             level_based_ccd_guess=False,colored_ccd_guess_iters=1,colored_ccd_guess_fraction=1.,ccd_method=None):
     from .solver_dat import SolverDAT
@@ -266,6 +267,7 @@ def run_own(arguments, *, enable_planar_dat=True, enable_broad_phase_boxes=False
                            enable_barrier_coloring=enable_barrier_coloring,
                            enable_color_ccd=enable_color_ccd,
                            **({"color_ccd_method": color_ccd_method} if color_ccd_method != "direct_rounding" else {}),
+                           **({"color_ccd_accept_uncertified": True} if color_ccd_accept_uncertified else {}),
                            **({"enable_color_ccd_contact_forces": True} if enable_color_ccd_contact_forces else {}),
                            **stock_options)
         solvers.append(solver)
@@ -287,7 +289,7 @@ def run_own(arguments, *, enable_planar_dat=True, enable_broad_phase_boxes=False
         newton.solvers.SolverVBD = original_solver
 
 
-def run_gs(arguments, *, enable_collisions=True):
+def run_gs(arguments, *, enable_collisions=True, accept_uncertified=False, guess_accept_uncertified=False):
     """Run the unchanged stock scene with our GS update and energy kernels."""
     from .solver import SolverIPC
     import newton.solvers
@@ -296,7 +298,11 @@ def run_gs(arguments, *, enable_collisions=True):
     solvers = []
 
     def gs_solver(model, **stock_options):
-        attach_stock_ipc(model, gs_predictor="colored")
+        attach_stock_ipc(model, gs_predictor="level" if guess_accept_uncertified else "colored")
+        if accept_uncertified:
+            model.ipc.params["gs_ccd_accept_uncertified"] = True
+        if guess_accept_uncertified:
+            model.ipc.params["gs_ccd_guess_accept_uncertified"] = True
         solver = SolverIPC(model, iterations=stock_options.get("iterations", ITERATIONS),
             enable_collisions=enable_collisions,
             vertex_contact_capacity=stock_options.get("particle_vertex_contact_buffer_size", 512),

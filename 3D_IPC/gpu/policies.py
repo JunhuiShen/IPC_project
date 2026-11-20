@@ -331,6 +331,12 @@ class InitialGuess:
         self.independent_colors = independent_colors
         self.device, self.model = ccd.device, ccd.model
         n = self.model.particle_count
+        accept_uncertified = params.get("gs_ccd_guess_accept_uncertified", False) if params is not None else False
+        if not isinstance(accept_uncertified, bool):
+            raise TypeError("gs_ccd_guess_accept_uncertified must be a bool")
+        if accept_uncertified and not (independent_colors and params.get("use_colored_ccd_guess_level_based", False)):
+            raise ValueError("Uncertified predictor fallback requires independent level-based CCD")
+        self._unclipped = wp.empty(n, wp.vec3, device=self.device) if accept_uncertified else None
         self.start = wp.empty(n, wp.vec3, device=self.device)
         self.targets = wp.empty(n, wp.vec3, device=self.device)
         self.proposal = wp.empty(n, wp.vec3, device=self.device)
@@ -361,7 +367,8 @@ class InitialGuess:
                 # corner moves per pair. Keep unrelated vertices' full steps,
                 # as CPU colored prediction does, with unchanged gap checks.
                 self.ccd.accept(q, self.targets, -1, dt, bounded=False, preserve_gap=True,
-                    colors=colors, current_color=self.color, query_view=query_view, independent=True)
+                    colors=colors, current_color=self.color, query_view=query_view, independent=True,
+                    unclipped=self._unclipped)
             else:
                 wp.launch(_color_proposal, self.model.particle_count,
                     [q, self.targets, self.model.particle_flags, colors, self.color, self.proposal], device=self.device)
@@ -384,6 +391,10 @@ class InitialGuess:
         fraction = params.get("colored_ccd_guess_fraction", 1.0)
         if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 0:
             raise ValueError("Colored CCD sweeps must be a nonnegative integer")
+        if params.get("gs_ccd_guess_accept_uncertified", False) != (self._unclipped is not None):
+            raise ValueError("Prepare the predictor with the requested uncertified fallback setting")
+        if self._unclipped is not None and (not level or sweeps == 0):
+            raise ValueError("Uncertified predictor fallback requires an active level-based CCD guess")
         if isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
             raise ValueError("Colored CCD fraction must be in [0,1]")
         global_guess = bool(params.get("use_ccd_guess", False)) and not legacy and not level
@@ -400,7 +411,7 @@ class InitialGuess:
         detector = detector or self.detector
         if detector is None:
             raise ValueError("The CCD predictor requires the actual Newton triangle-mesh detector")
-        c.detect_swept(detector, self.start, self.targets, 1.0e-8)
+        c.detect_swept(detector, self.start, self.targets)
         if global_guess:
             # One FP32 CCD pass computes the common conservative fraction and
             # rechecks its rounded endpoint. There is no separate FP64 TOI pass.

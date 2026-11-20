@@ -290,7 +290,7 @@ class CcdTests(CollisionFixture):
                 ccd.accept(q, wp.array(values, wp.vec3, device=device), 0, .01)
                 ccd.check()
                 endpoints.append(float(q.numpy()[0, 2]))
-            self.assertGreaterEqual(endpoints[1], 1e-8)
+            self.assertGreater(endpoints[1], np.float32(1e-7))
             self.assertLess(endpoints[1], .1)
             self.assertEqual(endpoints[1], endpoints[0])
             self.assertEqual(ccd.fraction.dtype, wp.float32)

@@ -506,6 +506,51 @@ class GroupQueryTests(unittest.TestCase):
                     np.testing.assert_array_equal(end[1:4], initial[1:4])
                 np.testing.assert_array_equal(q.numpy(), ends[1])
 
+    def test_level_uncertified_fallback_uses_the_target_in_both_sweeps_if_stalled(self):
+        base_params = {"use_colored_ccd_guess_level_based": True, "colored_ccd_guess_iters": 1}
+        for device in self.devices:
+            for method in ("plane", "direct_rounding"):
+                for height in (5e-8, .1):
+                    with self.subTest(device=str(device), method=method, height=height):
+                        ends_by_option = []
+                        for allow_uncertified in (False, True):
+                            q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+                            initial = q.numpy().copy()
+                            initial[0, 2] = height
+                            q.assign(initial)
+                            params = {**base_params, "ccd_method": method,
+                                      "gs_ccd_guess_accept_uncertified": allow_uncertified}
+                            model.ipc = SimpleNamespace(params=params)
+                            backend = CcdBackend(contacts, exact_geometry=False)
+                            policy = InitialGuess(backend, detector, params=params, use_group_queries=True,
+                                                  independent_colors=True)
+                            sweep = policy._sweep
+                            endpoints = []
+
+                            def record(q, colors, dt, **kwargs):
+                                np.testing.assert_array_equal(q.numpy(), initial)
+                                sweep(q, colors, dt, **kwargs)
+                                endpoints.append(q.numpy().copy())
+
+                            with patch.object(policy, "_sweep", side_effect=record):
+                                policy.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, params)
+                            backend.check()
+                            self.assertEqual(len(endpoints), 2)
+                            target = policy.targets.numpy()
+                            for endpoint in endpoints:
+                                np.testing.assert_array_equal(endpoint[1:4], initial[1:4])
+                                np.testing.assert_array_equal(endpoint[4], target[4])
+                                if height < 1e-7:
+                                    expected = target[0] if allow_uncertified else initial[0]
+                                    np.testing.assert_array_equal(endpoint[0], expected)
+                                else:
+                                    self.assertGreater(endpoint[0, 2], 1e-7)
+                                    self.assertLess(endpoint[0, 2], height)
+                            np.testing.assert_array_equal(q.numpy(), endpoints[-1])
+                            ends_by_option.append(endpoints)
+                        if height >= 1e-7:
+                            np.testing.assert_array_equal(*ends_by_option)
+
     def test_independent_predictor_capture_replay_matches_eager_and_full_free_target(self):
         devices = wp.get_cuda_devices()
         if not devices:

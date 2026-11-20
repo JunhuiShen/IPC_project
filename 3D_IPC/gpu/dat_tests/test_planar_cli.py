@@ -355,7 +355,8 @@ class PlanarCliTests(unittest.TestCase):
         self.assertIs(newton.solvers.SolverVBD, original)
 
     def _export_mock_trajectory(self, coloring,guess=False,cap=2,fraction=.9,method="interval",color_ccd=False,
-                                contact_forces=False,k_barrier=100.,friction=.2,color_method="direct_rounding"):
+                                contact_forces=False,k_barrier=100.,friction=.2,color_method="direct_rounding",
+                                accept_uncertified=False):
         import numpy as np
         import newton.examples
         import newton.solvers
@@ -422,6 +423,7 @@ class PlanarCliTests(unittest.TestCase):
                 if method != "interval":extra += ["--ccd-method",method]
                 if color_ccd:extra.append("--color-ccd")
                 if color_method != "direct_rounding":extra += ["--color-ccd-method",color_method]
+                if accept_uncertified:extra.append("--color-ccd-accept-uncertified")
                 if contact_forces:extra.append("--color-ccd-contact-forces")
                 self.assertEqual(export_twist_trajectory.main([
                     "--variant", "own", "--no-planar-dat", "--build-broad-phase-boxes",
@@ -432,6 +434,7 @@ class PlanarCliTests(unittest.TestCase):
                                                enable_broad_phase_boxes=True, enable_barrier_coloring=coloring,
                                                enable_color_ccd=color_ccd,
                                                **({"color_ccd_method":color_method} if color_method != "direct_rounding" else {}),
+                                               **({"color_ccd_accept_uncertified":True} if accept_uncertified else {}),
                                                iterations=4,
                                                **({"enable_color_ccd_contact_forces":True} if contact_forces else {}),
                                                **capacity_options)
@@ -457,6 +460,7 @@ class PlanarCliTests(unittest.TestCase):
             for key in ("solver_collision_processing_enabled", "collision_response_enabled", "color_ccd_enabled"):
                 self.assertIs(metadata[key], color_ccd)
             self.assertEqual(metadata["color_ccd_method"], color_method if color_ccd else None)
+            self.assertIs(metadata["color_ccd_accept_uncertified"], accept_uncertified)
             self.assertIs(metadata["collision_processing_enabled"],color_ccd or (guess and cap>0))
             self.assertIs(metadata["predictor_ccd_enabled"],guess and cap>0)
             for key in ("candidate_pair_generation_enabled", "combined_coloring_enabled",
@@ -518,6 +522,29 @@ class PlanarCliTests(unittest.TestCase):
         self._export_mock_trajectory(True, color_ccd=True, color_method="plane")
         self._export_mock_trajectory(True, guess=True, method="direct_rounding",
                                      color_ccd=True, color_method="plane", contact_forces=True)
+
+    def test_uncertified_color_ccd_option_is_forwarded_and_recorded(self):
+        self._export_mock_trajectory(True, color_ccd=True, color_method="plane", accept_uncertified=True)
+        with patch.object(run, "_runtime", side_effect=self.runtime), \
+             patch.object(dat_twist, "run_own", return_value=0) as own, redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--solver", "dat", "--stock-cloth-twist", "--no-planar-dat",
+                "--build-broad-phase-boxes", "--color-barrier-pairs", "--color-ccd",
+                "--color-ccd-method", "plane", "--color-ccd-accept-uncertified"]), 0)
+        self.assertIs(own.call_args.kwargs["color_ccd_accept_uncertified"], True)
+
+    def test_uncertified_color_ccd_option_requires_plane_before_runtime(self):
+        flags = ["--no-planar-dat", "--build-broad-phase-boxes", "--color-barrier-pairs",
+                 "--color-ccd", "--color-ccd-accept-uncertified"]
+        with patch.object(run, "_runtime") as runtime, redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(run.main(["--solver", "dat", *flags]), 1)
+            runtime.assert_not_called()
+        self.assertIn("requires --color-ccd --color-ccd-method plane", errors.getvalue())
+        with patch("gpu.select_newton_runtime") as runtime, redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as result:
+                export_twist_trajectory.main(["--variant", "own", "--output", "/tmp/unused.npz", *flags])
+            self.assertEqual(result.exception.code, 2)
+            runtime.assert_not_called()
+        self.assertIn("requires --color-ccd --color-ccd-method plane", errors.getvalue())
 
     def test_plane_color_method_requires_color_ccd_before_runtime(self):
         with patch.object(run, "_runtime") as runtime, redirect_stderr(io.StringIO()):

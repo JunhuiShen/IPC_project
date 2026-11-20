@@ -97,6 +97,8 @@ def main(argv=None):
                         help="with --variant own --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs, clip actual VBD color updates with independent per-vertex FP32 CCD")
     parser.add_argument("--color-ccd-method", choices=("direct_rounding", "plane"), default="direct_rounding",
                         help="per-color CCD acceptance, independent of initial-guess --ccd-method (default: direct_rounding)")
+    parser.add_argument("--color-ccd-accept-uncertified", action="store_true",
+                        help="with --color-ccd-method plane, use the box-clamped proposal when CCD rejects all motion; allows crossings")
     parser.add_argument("--color-ccd-contact-forces", action="store_true",
                         help="with --color-ccd, assemble IPC barrier and friction forces before each VBD color update")
     parser.add_argument("--no-collisions", action="store_true",
@@ -129,6 +131,8 @@ def main(argv=None):
         parser.error("--color-ccd requires --variant own --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs")
     if args.color_ccd_method != "direct_rounding" and not args.color_ccd:
         parser.error("--color-ccd-method plane requires --color-ccd")
+    if args.color_ccd_accept_uncertified and (not args.color_ccd or args.color_ccd_method != "plane"):
+        parser.error("--color-ccd-accept-uncertified requires --color-ccd --color-ccd-method plane")
     if args.color_ccd_contact_forces and not args.color_ccd:
         parser.error("--color-ccd-contact-forces requires --color-ccd")
     if args.no_collisions and args.variant != "gs":
@@ -188,6 +192,7 @@ def main(argv=None):
                                    enable_barrier_coloring=args.color_barrier_pairs,
                                    enable_color_ccd=args.color_ccd,
                                    **({"color_ccd_method": args.color_ccd_method} if args.color_ccd_method != "direct_rounding" else {}),
+                                   **({"color_ccd_accept_uncertified": True} if args.color_ccd_accept_uncertified else {}),
                                    **({"enable_color_ccd_contact_forces": True} if args.color_ccd_contact_forces else {}),
                                    **stock_options)
 
@@ -233,6 +238,7 @@ def main(argv=None):
                           "mesh_collision_energies_enabled": barrier_enabled,
                           "friction_enabled": friction_enabled,
                           "color_ccd_method": args.color_ccd_method if args.color_ccd else None,
+                          "color_ccd_accept_uncertified": args.color_ccd_accept_uncertified,
                           "collision_response_enabled": solver_collision_processing_enabled,
                           "solver_collision_processing_enabled": solver_collision_processing_enabled,
                           "collision_processing_enabled": solver_collision_processing_enabled or predictor_ccd_enabled,
@@ -300,6 +306,7 @@ def main(argv=None):
             "color_ccd_enabled": args.color_ccd,
             "color_ccd_contact_forces_enabled": args.color_ccd_contact_forces,
             "color_ccd_method": args.color_ccd_method if args.color_ccd else None,
+            "color_ccd_accept_uncertified": args.color_ccd_accept_uncertified,
             "collision_queries_enabled": collision_processing_enabled or args.color_barrier_pairs or predictor_ccd_enabled,
             "collision_response_enabled": solver_collision_processing_enabled,
             "solver_collision_processing_enabled": solver_collision_processing_enabled,

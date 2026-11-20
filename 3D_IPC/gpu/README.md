@@ -209,7 +209,8 @@ while collision response stays off:
 
 `--build-broad-phase-boxes` requires `--solver dat --no-planar-dat`. It builds
 our adaptive node boxes, face/edge AABBs and BVHs. The node radius uses
-`node_box_min`/`node_box_max`; face bounds use our energy `d_hat`. Boxes refit
+`node_box_min`/`node_box_max`. The query padding is `d_hat`, raised to at least
+the linear CCD gap floor when `--color-ccd` is enabled. Boxes refit
 after prediction and every `node_box_update_count` solver iterations, with
 hierarchy rebuilds when the scene requests them. Without the separate predictor
 or coloring options, queries, contact rows,
@@ -260,6 +261,11 @@ moving vertex's own fraction, as in the level-based predictor. A blocked
 vertex does not shorten unrelated vertices in its color. CCD clips actual
 VBD updates. By default, contact forces, friction, SDF terms and planar DAT
 limits remain off. The material local solve and combined color order are unchanged.
+
+For experiments with `--color-ccd-method plane`, add
+`--color-ccd-accept-uncertified` to publish the original box-clamped proposal
+when per-color CCD would leave a vertex stationary. Certified partial steps
+still apply. The fallback can let primitives cross.
 
 Add `--color-ccd-contact-forces` to evaluate IPC barrier and friction contributions
 from the current positions before each color's material solve. Each contact
@@ -380,6 +386,18 @@ as described above. Our DAT path
 currently rejects rigid bodies; use GS for rigid and mixed scenes. OGC,
 cloth-grid and Jacobi modes are not available in this GPU driver.
 
+For deformable GS experiments, `--gs-ccd-accept-uncertified` uses the
+box-clamped proposal when update CCD would leave a vertex stationary.
+For the level-based predictor, the separate opt-in
+`--gs-ccd-guess-accept-uncertified` uses the predicted position if CCD
+would otherwise leave the vertex stationary. The discarded probe and
+updating sweeps use the same acceptance rule. Both options keep certified
+partial steps and can allow crossings. On native scenes, select the
+level-based guess with `--use_colored_ccd_guess false
+--use_colored_ccd_guess_level_based true --colored_ccd_guess_iters 1`.
+On `--stock-cloth-twist`, the predictor opt-in selects one level-based
+updating sweep.
+
 For native scene runs:
 
 - Use `--num_frames` with an underscore. `--substeps` sets the steps per
@@ -431,7 +449,7 @@ remain available; selecting a method can change the trajectory and contact work.
 Both use independent per-vertex fractions and verify shortened stored endpoints
 after reducing all incident contacts. They use neither bisection nor a
 higher-precision fallback; an uncertified move stays at the starting position.
-Both conservatively require a fixed direction to certify the full `1e-8`
+Both conservatively require a fixed direction to certify the full `1e-7`
 gap floor. In particular, they do not reproduce the CPU fallback's exact
 `min(starting gap, gap floor)` policy for starts below that floor. The
 `direct_rounding` method leaves rigid-body CCD unchanged. Changes in accepted

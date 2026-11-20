@@ -103,7 +103,7 @@ BoxProof = wp.types.vector(length=5, dtype=wp.float64)  # verdict, witness axis,
     const double contact_radius=maximum(d_hat,double(radius.f));
     if(!finite(contact_radius))return 0;
     const double scaled_floor=multiply(point(128.0*DBL_EPSILON),point(scale)).hi;
-    const double floor=maximum(1e-8,maximum(1e-10,scaled_floor));
+    const double floor=maximum(double(1e-7f),scaled_floor);
     const double required=add(point(contact_radius),point(floor)).hi;
     if(!finite(required))return 0;
     proof[4]=required;

@@ -191,6 +191,14 @@ int main() {
     q.end[0][0] = 4.0f; q.end[0][1] = 3.0f; q.end[0][2] = 1.0f;
     require(check(q).full_step, "Changing EE closest features broke a fixed separator");
 
+    // The proposed endpoint clears the former 1e-8 floor, but enters the new one.
+    q = crossing(true, 0, 3.0e-7f);
+    q.end[0][2] = 5.0e-8f;
+    const auto near_floor = check(q);
+    require(near_floor.fraction > 0.0f && near_floor.fraction < 1.0f
+            && near_floor.endpoint[0][2] > 1.0e-7f,
+            "Default CCD floor should shorten this move while allowing positive progress");
+
     // Analytic gap-floor check on accepted point/triangle motion.
     q = crossing(true, 0, 0.125f); q.gap_floor = 0.01f;
     const auto floor_result = check(q);

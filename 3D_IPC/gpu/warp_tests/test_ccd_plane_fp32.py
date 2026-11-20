@@ -183,7 +183,7 @@ class Float32PlaneWarpTests(unittest.TestCase):
                         self.assertGreater(.5 * (float(actual[0, 2]) + float(actual[1, 2])),
                                            float(actual[2, 2]))
                     else:
-                        self.assertGreater(actual[0, 2], np.float32(1e-8))
+                        self.assertGreater(actual[0, 2], np.float32(1e-7))
                     np.testing.assert_array_equal(actual[1:4], data.start[1:4])
                     np.testing.assert_array_equal(actual[4], proposed[4])
                     self.assertEqual(int(backend.attempts.numpy()[0]), 1)

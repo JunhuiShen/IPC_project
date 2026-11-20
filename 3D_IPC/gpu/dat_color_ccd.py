@@ -150,18 +150,27 @@ def get_color_ccd_kernels(method="direct_rounding"):
 def _publish(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], colors: wp.array[int],
              current: wp.array[int], rejected: wp.array[int], fractions: wp.array[float],
              lower: wp.array[wp.vec3], upper: wp.array[wp.vec3],
-             reference: wp.array[wp.vec3], displacement: wp.array[wp.vec3], error: wp.array[int]):
+             reference: wp.array[wp.vec3], displacement: wp.array[wp.vec3], error: wp.array[int],
+             proposed: wp.array[wp.vec3], accept_uncertified: bool):
     vertex = wp.tid()
     if error[0] == 0 and colors[vertex] == current[0]:
+        point = candidate[vertex]
+        moved = bool(False)
         # FP32 endpoint reconstruction must not escape candidate coverage,
         # including vertices with no incident pairs to recertify.
         for axis in range(3):
-            if (not wp.isfinite(candidate[vertex][axis])
-                    or candidate[vertex][axis] < lower[vertex][axis]
-                    or candidate[vertex][axis] > upper[vertex][axis]):
+            moved = moved or point[axis] != q[vertex][axis]
+            if (not wp.isfinite(point[axis])
+                    or point[axis] < lower[vertex][axis]
+                    or point[axis] > upper[vertex][axis]):
                 rejected[vertex] = 1
+        if accept_uncertified and (rejected[vertex] != 0 or (fractions[vertex] < 1.0 and not moved)):
+            # _prepare already checked this endpoint against the movement box.
+            point = proposed[vertex]
+            fractions[vertex] = 1.0
+            rejected[vertex] = 0
         if rejected[vertex] == 0:
-            q[vertex] = candidate[vertex]
+            q[vertex] = point
         else:
             fractions[vertex] = 0.0
         # Rebase exactly rather than subtracting/adding accepted displacements.
@@ -177,9 +186,14 @@ class ColorCcd:
     publishes graph.current_color, and runs entirely on the selected device.
     """
 
-    def __init__(self, model, boxes, graph, error, *, method="direct_rounding"):
+    def __init__(self, model, boxes, graph, error, *, method="direct_rounding", accept_uncertified=False):
+        if not isinstance(accept_uncertified, bool):
+            raise TypeError("accept_uncertified must be a bool")
+        if accept_uncertified and method != "plane":
+            raise ValueError("accept_uncertified requires the plane CCD method")
         self._propose, self._verify = get_color_ccd_kernels(method)
         self.method = method
+        self.accept_uncertified = accept_uncertified
         if 4 * graph.capacity >= 2**31:
             raise ValueError("Color CCD pair incidence exceeds int32 capacity")
         minimum = np.nextafter(np.float32(boxes.minimum), np.float32(-np.inf))
@@ -194,6 +208,7 @@ class ColorCcd:
         self.center = wp.clone(model.particle_q)
         self.radii = wp.clone(boxes.radii)
         self.candidate = wp.empty(n, wp.vec3, device=d)
+        self.proposed = wp.empty_like(self.candidate) if accept_uncertified else self.candidate
         self.fractions = wp.ones(n, float, device=d)
         self.rejected = wp.zeros(n, int, device=d)
         self.pair_ids = wp.empty(4 * graph.capacity, int, device=d)
@@ -247,6 +262,8 @@ class ColorCcd:
                    g.colors, g.current_color, self.model.particle_flags, self.model.particle_mass,
                    b.ccd_epoch, g.ccd_epoch, g.ccd_source_box_epoch, self._box_epoch, self._graph_epoch,
                    self.candidate, self.fractions, self.rejected, self.error], device=d)
+        if self.accept_uncertified:
+            wp.copy(self.proposed, self.candidate)
         if g.capacity:
             wp.launch(self._propose, self.workers,
                       [q, self.candidate, g.candidate_nodes, g.candidate_count, g.candidate_offsets,
@@ -261,7 +278,8 @@ class ColorCcd:
                        self.rejected, self.error], device=d, block_dim=64)
         wp.launch(_publish, self.n,
                   [q, self.candidate, g.colors, g.current_color, self.rejected,
-                   self.fractions, b.node_lower, b.node_upper, reference, displacement, self.error], device=d)
+                   self.fractions, b.node_lower, b.node_upper, reference, displacement, self.error,
+                   self.proposed, self.accept_uncertified], device=d)
 
 
 for _kernel in (_count_pairs, _fill_pairs, _prepare, _publish):

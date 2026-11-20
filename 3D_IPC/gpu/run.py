@@ -270,10 +270,16 @@ def main(argv=None):
                         help="with --solver dat --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs, clip actual VBD color updates with independent per-vertex FP32 CCD")
     parser.add_argument("--color-ccd-method", choices=("direct_rounding", "plane"), default="direct_rounding",
                         help="per-color CCD method, independent of --ccd-method (default: direct_rounding)")
+    parser.add_argument("--color-ccd-accept-uncertified", action="store_true",
+                        help="with --color-ccd-method plane, use the box-clamped proposal when CCD rejects all motion; allows crossings")
     parser.add_argument("--color-ccd-contact-forces", action="store_true",
                         help="with --color-ccd, assemble IPC barrier and friction forces before each VBD color update")
     parser.add_argument("--no-collisions", action="store_true",
                         help="for deformable GS, disable collision processing, CCD and movement-box limits")
+    parser.add_argument("--gs-ccd-accept-uncertified", action="store_true",
+                        help="for deformable GS, use the box-clamped proposal if update CCD would leave the vertex stationary")
+    parser.add_argument("--gs-ccd-guess-accept-uncertified", action="store_true",
+                        help="for GS level-based CCD, use the predictor target if it would leave the vertex stationary")
     parser.add_argument("--vertex-contact-capacity", type=_positive,
                         help="triangle-contact/candidate row capacity per vertex (native scenes: 128; stock scene: its original default)")
     parser.add_argument("--edge-contact-capacity", type=_positive,
@@ -313,10 +319,16 @@ def main(argv=None):
             raise ValueError("--color-ccd requires --solver dat --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs")
         if options.color_ccd_method != "direct_rounding" and not options.color_ccd:
             raise ValueError("--color-ccd-method plane requires --color-ccd")
+        if options.color_ccd_accept_uncertified and (not options.color_ccd or options.color_ccd_method != "plane"):
+            raise ValueError("--color-ccd-accept-uncertified requires --color-ccd --color-ccd-method plane")
         if options.color_ccd_contact_forces and not options.color_ccd:
             raise ValueError("--color-ccd-contact-forces requires --color-ccd")
         if options.no_collisions and options.solver != "ipc":
             raise ValueError("--no-collisions requires --solver ipc")
+        if options.gs_ccd_accept_uncertified and (options.solver != "ipc" or options.no_collisions):
+            raise ValueError("--gs-ccd-accept-uncertified requires --solver ipc with collisions enabled")
+        if options.gs_ccd_guess_accept_uncertified and (options.solver != "ipc" or options.no_collisions):
+            raise ValueError("--gs-ccd-guess-accept-uncertified requires --solver ipc with collisions enabled")
         if options.solver in ("dat", "dat-reference"):
             from gpu import select_newton_runtime
             select_newton_runtime("reference")
@@ -344,13 +356,16 @@ def main(argv=None):
             if options.stock_cloth_twist:
                 if options.solver == "ipc":
                     from .dat_twist import run_gs
-                    return run_gs(forwarded, enable_collisions=not options.no_collisions)
+                    return run_gs(forwarded, enable_collisions=not options.no_collisions,
+                                  **({"accept_uncertified": True} if options.gs_ccd_accept_uncertified else {}),
+                                  **({"guess_accept_uncertified": True} if options.gs_ccd_guess_accept_uncertified else {}))
                 from .dat_twist import run_own as run
                 return run(forwarded, enable_planar_dat=not options.no_planar_dat,
                            enable_broad_phase_boxes=options.build_broad_phase_boxes,
                            enable_barrier_coloring=options.color_barrier_pairs,
                            enable_color_ccd=options.color_ccd,
                            **({"color_ccd_method": options.color_ccd_method} if options.color_ccd_method != "direct_rounding" else {}),
+                           **({"color_ccd_accept_uncertified": True} if options.color_ccd_accept_uncertified else {}),
                            vertex_contact_capacity=options.vertex_contact_capacity,
                            edge_contact_capacity=options.edge_contact_capacity,
                            **({"enable_color_ccd_contact_forces": True} if options.color_ccd_contact_forces else {}),
@@ -384,10 +399,16 @@ def main(argv=None):
                     "solver_collision_processing": True, "collision_processing": True})
             if options.color_ccd_method != "direct_rounding":
                 exporter.scene["params"]["color_ccd_method"] = options.color_ccd_method
+            if options.color_ccd_accept_uncertified:
+                exporter.scene["params"]["color_ccd_accept_uncertified"] = True
             if options.color_ccd_contact_forces:
                 exporter.scene["params"]["enable_color_ccd_contact_forces"] = True
             if options.no_collisions:
                 exporter.scene["params"]["collision_processing"] = False
+            if options.gs_ccd_accept_uncertified:
+                exporter.scene["params"]["gs_ccd_accept_uncertified"] = True
+            if options.gs_ccd_guess_accept_uncertified:
+                exporter.scene["params"]["gs_ccd_guess_accept_uncertified"] = True
             model = scene.create_model(exporter.scene, device)
             solver_class = solver_module.SolverIPC if options.solver == "ipc" else solver_module.SolverDAT
             # Native scenes supply their interaction distance. Use the same
@@ -404,6 +425,8 @@ def main(argv=None):
                                   "enable_collisions": not options.no_collisions}
             if options.color_ccd_method != "direct_rounding":
                 solver_options["color_ccd_method"] = options.color_ccd_method
+            if options.color_ccd_accept_uncertified:
+                solver_options["color_ccd_accept_uncertified"] = True
             if options.color_ccd_contact_forces:
                 solver_options["enable_color_ccd_contact_forces"] = True
             vertex_capacity = options.vertex_contact_capacity or 128

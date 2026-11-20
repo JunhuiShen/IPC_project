@@ -20,6 +20,7 @@ from . import contact, sdf
 from .contact import FullPacket, decode_candidate
 from .gs_contact_energies import make_full_evaluator
 from .ccd import round_inside, interpolate_positions
+from .ccd_defaults import LINEAR_CCD_GAP_FLOOR
 from .warp_build import configure_module as _configure
 
 
@@ -548,7 +549,6 @@ def _angular_velocity(previous: wp.quat, current: wp.quat, dt: float) -> wp.vec3
     ccd32::LinearQuery linear;
     rigid_ccd32::Query rotation;
     linear.vertex_face=rotation.vertex_face=kind==0;
-    linear.gap_floor=1.0e-8f;
     float center[3],target_center[3],q[4],target_q[4];
     for(int k=0;k<3;++k){center[k]=current_com[k];target_center[k]=target_com[k];rotation.center[k]=center[k];}
     for(int k=0;k<4;++k){q[k]=current_rotation[(k+3)%4];target_q[k]=target_rotation[(k+3)%4];
@@ -782,7 +782,7 @@ class BodySolver:
         # coordinate. Include float32 projection rounding at both endpoints.
         coordinate = float(np.max(np.abs(m.particle_q.numpy()), initial=0.0))
         rounding = 64.0 * np.finfo(np.float32).eps * max(1.0, coordinate, maximum_radius)
-        self.query_radius = max(float(p["d_hat"]), 1e-8) + 2.0 * (self.radius + arc + rounding)
+        self.query_radius = max(float(p["d_hat"]), LINEAR_CCD_GAP_FLOOR) + 2.0 * (self.radius + arc + rounding)
 
     def refresh(self, state):
         """Called after the upstream BVH candidate rebuild, entirely on-device."""

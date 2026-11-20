@@ -18,14 +18,14 @@ from gpu.solver_dat import SolverDAT
 
 
 def workspace(device, points, triangles=(), edges=(), *, radius=3., flags=None, masses=None,
-              method="direct_rounding"):
+              method="direct_rounding", accept_uncertified=False):
     model = graph_model(device, points, triangles, edges)
     if flags is not None:
         model.particle_flags.assign(flags)
     if masses is not None:
         model.particle_mass.assign(masses)
     boxes, graph, error = make_graph(model)
-    ccd = ColorCcd(model, boxes, graph, error, method=method)
+    ccd = ColorCcd(model, boxes, graph, error, method=method, accept_uncertified=accept_uncertified)
     boxes.radii.fill_(radius)
     boxes.update(model.particle_q)
     graph.update()
@@ -123,17 +123,48 @@ class ColorCcdTests(unittest.TestCase):
         for z in (plane, plane + ulp):
             points.extend([[-1., -1., z], [1., -1., z], [0., 1., z]])
         points = np.asarray(points, np.float32)
-        for device in self.devices:
+        for device, accept_uncertified in product(self.devices, (False, True)):
             model, _, graph, ccd, error, reference, displacement = workspace(
-                device, points, [[1, 2, 3], [4, 5, 6]], method="plane")
+                device, points, [[1, 2, 3], [4, 5, 6]], method="plane",
+                accept_uncertified=accept_uncertified)
             graph.current_color.fill_(int(graph.colors.numpy()[0]))
             motion = np.zeros_like(points)
             motion[0, 2] = -4 * ulp
             displacement.assign(motion)
             ccd.apply(model.particle_q, reference, displacement)
             self.assertEqual(int(error.numpy()[0]), 0)
-            np.testing.assert_array_equal(model.particle_q.numpy(), points)
-            self.assertEqual(int(ccd.rejected.numpy()[0]), 1)
+            expected = points + motion if accept_uncertified else points
+            np.testing.assert_array_equal(model.particle_q.numpy(), expected)
+            np.testing.assert_array_equal(reference.numpy(), expected)
+            self.assertEqual(float(ccd.fractions.numpy()[0]), float(accept_uncertified))
+            self.assertEqual(int(ccd.rejected.numpy()[0]), int(not accept_uncertified))
+
+    def test_uncertified_fallback_only_replaces_stalled_updates(self):
+        for device, height in product(self.devices, (5e-8, .25)):
+            with self.subTest(device=str(device), height=height):
+                points = np.float32([[.25, .25, height], [0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
+                model, _, graph, ccd, error, reference, displacement = workspace(
+                    device, points, [[1, 2, 3]], method="plane", accept_uncertified=True)
+                graph.current_color.fill_(int(graph.colors.numpy()[0]))
+                motion = np.zeros_like(points)
+                motion[0, 2] = -.5
+                displacement.assign(motion)
+                ccd.apply(model.particle_q, reference, displacement)
+                actual = model.particle_q.numpy()
+                fraction = float(ccd.fractions.numpy()[0])
+                if height < 1e-7:
+                    np.testing.assert_array_equal(actual, points + motion)
+                    self.assertEqual(fraction, 1.)
+                else:
+                    self.assertGreater(actual[0, 2], np.float32(1e-7))
+                    self.assertLess(actual[0, 2], points[0, 2])
+                    self.assertGreater(fraction, 0.)
+                    self.assertLess(fraction, 1.)
+                self.assertEqual(int(error.numpy()[0]), 0)
+
+    def test_uncertified_fallback_requires_plane(self):
+        with self.assertRaisesRegex(ValueError, "requires the plane CCD method"):
+            ColorCcd(None, None, None, None, method="direct_rounding", accept_uncertified=True)
 
     def test_color_method_is_separate_from_predictor_and_validated(self):
         model = fixture("cpu", predictor=False)

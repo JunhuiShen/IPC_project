@@ -92,6 +92,35 @@ class IndependentCcdTests(unittest.TestCase):
                     self.assertGreaterEqual(int(backend.attempts.numpy()[0]), 2)
                     self.assertEqual(int(backend.verified.numpy()[0]), 1)
 
+    def test_uncertified_fallback_restores_only_stalled_box_clamped_proposals(self):
+        for device in self.devices:
+            for method in ("interval", "plane"):
+                for height in (5e-8, .1):
+                    with self.subTest(device=str(device), method=method, height=height):
+                        accepted = []
+                        for accept_uncertified in (False, True):
+                            data = fixture(device, height=height)
+                            data.model.ipc = SimpleNamespace(params={"ccd_method": method})
+                            proposed = data.start.copy()
+                            proposed[0, 2] = -.8
+                            proposed[4, 0] += .125
+                            backend = CcdBackend(data.contacts, node_box_radius=.25)
+                            unclipped = wp.empty_like(data.q) if accept_uncertified else None
+                            accept(data, backend, wp.array(proposed, wp.vec3, device=device), unclipped=unclipped)
+                            backend.check()
+                            actual = data.q.numpy().copy()
+                            np.testing.assert_array_equal(actual[1:4], data.start[1:4])
+                            np.testing.assert_array_equal(actual[4], proposed[4])
+                            accepted.append(actual[0, 2])
+                        if height < 1e-7:
+                            self.assertEqual(accepted[0], np.float32(height))
+                            self.assertGreaterEqual(float(accepted[1]), height - .25)
+                            self.assertLess(float(accepted[1]), -.24)
+                        else:
+                            self.assertEqual(accepted[0], accepted[1])
+                            self.assertGreater(float(accepted[1]), 1e-7)
+                            self.assertLess(float(accepted[1]), height)
+
     def test_edge_endpoint_fraction_is_reduced_only_onto_that_endpoint(self):
         for device in self.devices:
             data = fixture(device, edge=True)

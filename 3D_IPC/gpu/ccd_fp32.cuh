@@ -27,7 +27,7 @@ struct LinearQuery {
     float start[4][3]{};
     float end[4][3]{};
     bool vertex_face = true;
-    float gap_floor = 1e-8f;
+    float gap_floor = 1e-7f;
 };
 
 struct ClipResult {

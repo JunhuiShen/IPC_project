@@ -25,6 +25,7 @@ from newton._src.geometry.tri_mesh_collision import TriMeshCollisionInfo
 
 from .warp_build import configure_module as _configure, flatten_headers as _flatten_headers
 from .movement_box_queries import build_nodes as _build_box_nodes
+from .ccd_defaults import LINEAR_CCD_GAP_FLOOR
 
 
 HEADERS = ("contact.cuh", "contact_exact.cuh", "original_contact.cuh", "exact.cuh")
@@ -700,7 +701,7 @@ class ContactBackend:
             self.info.edge_colliding_edges_count.zero_()
         self.refresh()
 
-    def detect_swept(self, detector, start, end, reach=1.0e-8):
+    def detect_swept(self, detector, start, end, reach=LINEAR_CCD_GAP_FLOOR):
         """Reuse the same upstream BVHs with whole initial-guess motion boxes.
 
         The caller must refit the detector to actual accepted positions before
