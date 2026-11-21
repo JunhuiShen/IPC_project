@@ -306,13 +306,10 @@ class GsBoxEpochFilter:
         if isinstance(params, Mapping):
             p = parameters(d_hat=params["d_hat"], k_barrier=params["k_barrier"], dt=params["dt"],
                 friction=params.get("friction", params.get("friction_coefficient", 0.0)),
-                eps_v=params.get("eps_v", params.get("friction_velocity_epsilon", .001)),
-                exact_geometry=params.get("exact_geometry", params.get("exact_computation_fallback", True)))
+                eps_v=params.get("eps_v", params.get("friction_velocity_epsilon", .001)))
         else:
-            if params.exact_geometry not in (0, 1):
-                raise ValueError("Invalid GS box-filter contact geometry mode")
             p = parameters(d_hat=params.d_hat, k_barrier=params.k_barrier, dt=params.dt,
-                friction=params.friction, eps_v=params.eps_v, exact_geometry=bool(params.exact_geometry))
+                friction=params.friction, eps_v=params.eps_v)
             if not math.isfinite(params.eps) or params.eps <= 0:
                 raise ValueError("Invalid GS box-filter contact epsilon")
         if self.source_generation == c.query_generation:

@@ -1076,11 +1076,15 @@ class SolverIPC(SolverVBD):
         self.ccd_backend = None
         if enable_collisions:
             from .contact import ContactBackendIPC
+            # Rigid contact pullback uses the native DAT packets. Deformable
+            # GS uses the project's full geometric contact derivatives.
+            contact_model = "dat" if model.body_count else "project"
+            contact_precision = "float32" if model.body_count else "float64"
             self.contact_backend = ContactBackendIPC(model, self.trimesh_collision_info,
-                grouped_precision=p.get("gs_contact_precision", "float32"), energy_model="dat",
+                grouped_precision=p.get("gs_contact_precision", contact_precision), energy_model=contact_model,
                 d_hat=float(p["d_hat"]), k_barrier=float(p["k_barrier"]),
                 friction=float(p["friction_coefficient"]), eps_v=float(p["friction_velocity_epsilon"]),
-                exact_geometry=bool(p["exact_computation_fallback"]), node_body=model.ipc.node_body, error=self.error,
+                node_body=model.ipc.node_body, error=self.error,
                 track_query_epoch=bool(self._contact_aware_gs or p.get("use_colored_ccd_guess", False) or
                                        p.get("use_colored_ccd_guess_level_based", False)))
             self.ccd_backend = CcdBackend(self.contact_backend, node_box_radius=self._box_radius,

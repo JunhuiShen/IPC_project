@@ -342,6 +342,22 @@ int main(int argc, char** argv) {
         check(at_fraction(q, fraction)); ++rounding;
     }
 
+    // The full move can pass while a smaller stored prefix hits an oblique
+    // face. Different coordinate ULPs let the two rounding errors add.
+    const float x = 150000.0f, y = 100000.0f;
+    const float ulp = std::nextafter(y, INFINITY) - y;
+    q = {{{x + 2.0f * ulp, y, .09f}, {x-1.0f, y+1.0f+ulp, -1.0f},
+          {x+1.0f, y-1.0f+ulp, -1.0f}, {x, y+ulp, 1.0f}},
+         {{x, y + 2.0f * ulp, -.06f}, {x-1.0f, y+1.0f+ulp, -1.0f},
+          {x+1.0f, y-1.0f+ulp, -1.0f}, {x, y+ulp, 1.0f}}};
+    require(direct::validate_linear(q) == Status::Safe && exact(q) == ExactStatus::Safe,
+            "Full endpoint should preserve separation for the oblique fixture");
+    require(exact(at_fraction(q, .6f)) == ExactStatus::Unsafe,
+            "Oblique fixture did not produce a colliding rounded prefix");
+    require(direct::propose_fraction(q) < .6f,
+            "Direct proposal allowed an unsafe fraction selected by another pair");
+    check(q); ++rounding;
+
     // The rounded displacement Dhat can differ from the exact subtraction.
     // Reconstructing with FMA must remain safe even when that lost bit changes
     // the represented endpoint near the limiting fraction.

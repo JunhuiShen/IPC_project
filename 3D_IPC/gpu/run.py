@@ -257,7 +257,7 @@ def main(argv=None):
     parser.add_argument("--level-based-ccd-guess", action="store_true",
                         help="for --solver dat, replace the native predictor with our GPU level-based CCD initial guess")
     parser.add_argument("--ccd-method", choices=("interval", "plane", "direct_rounding"),
-                        help="initial-guess CCD method; independent of --color-ccd-method")
+                        help="CCD method for GS updates and prediction, or for the DAT predictor")
     parser.add_argument("--colored-ccd-guess-iters", type=_nonnegative,
                         help="with --level-based-ccd-guess, updating sweep cap (default: 1, plus one discarded probe)")
     parser.add_argument("--colored-ccd-guess-fraction", type=_fraction,
@@ -296,8 +296,8 @@ def main(argv=None):
     try:
         if options.level_based_ccd_guess and options.solver != "dat":
             raise ValueError("--level-based-ccd-guess requires --solver dat")
-        if options.ccd_method is not None and not options.level_based_ccd_guess:
-            raise ValueError("--ccd-method requires --level-based-ccd-guess")
+        if options.ccd_method is not None and options.solver != "ipc" and not options.level_based_ccd_guess:
+            raise ValueError("--ccd-method for DAT requires --level-based-ccd-guess")
         if not options.level_based_ccd_guess and (options.colored_ccd_guess_iters is not None or
                                                  options.colored_ccd_guess_fraction is not None):
             raise ValueError("--colored-ccd-guess-iters/fraction require --level-based-ccd-guess")
@@ -357,6 +357,7 @@ def main(argv=None):
                 if options.solver == "ipc":
                     from .dat_twist import run_gs
                     return run_gs(forwarded, enable_collisions=not options.no_collisions,
+                                  **({"ccd_method": options.ccd_method} if options.ccd_method is not None else {}),
                                   **({"accept_uncertified": True} if options.gs_ccd_accept_uncertified else {}),
                                   **({"guess_accept_uncertified": True} if options.gs_ccd_guess_accept_uncertified else {}))
                 from .dat_twist import run_own as run

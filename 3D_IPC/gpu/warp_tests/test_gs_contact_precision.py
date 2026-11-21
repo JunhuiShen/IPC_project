@@ -126,8 +126,8 @@ class GsContactPrecisionTests(unittest.TestCase):
                     self.assertEqual(int(compact[1]._grouped_fast.ordinary_count.numpy()[0]), 1)
                     for a, b in zip(actual, expected):
                         np.testing.assert_array_equal(a, b)
-                    if not exact:
-                        self.assertEqual(int(compact[1].pending_count.numpy()[0]), 0)
+                    self.assertEqual(int(compact[1].pending_count.numpy()[0]),
+                                     int(ordinary[1].pending_count.numpy()[0]))
             points = [[.2, .2, 1e-12], [0, 0, 0], [1, 0, 0], [0, 1, 0]]
             compact = make_case(device, 0, points)
             ordinary = make_case(device, 0, points, precision="float64")

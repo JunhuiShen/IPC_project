@@ -353,7 +353,7 @@ class EnergyWorkspace:
     def begin(self,dt,collision_radius,friction_mu,friction_epsilon):
         self.context.parameters = contact.parameters(d_hat=float(np.float32(collision_radius)),
             k_barrier=self.k_barrier,dt=float(np.float32(dt)),friction=float(np.float32(friction_mu)),
-            eps_v=float(np.float32(friction_epsilon)),exact_geometry=False)
+            eps_v=float(np.float32(friction_epsilon)))
         return self.context
 
     def check(self):

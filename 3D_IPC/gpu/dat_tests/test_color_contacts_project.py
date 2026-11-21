@@ -89,5 +89,24 @@ class ProjectColorContactTests(unittest.TestCase):
                 np.testing.assert_allclose(hessian.numpy()[role], expected_hessian, rtol=5.e-5, atol=5.e-5)
 
 
+    def test_uncertain_contact_replays_the_project_evaluator(self):
+        points = np.float32([[.25, .25, 1.e-12], [0., 0., 0.],
+                             [1., 0., 0.], [0., 1., 0.]])
+        for device in self.devices:
+            with self.subTest(device=str(device)):
+                model, _, graph, ccd, error, _, _ = workspace(device, points, [[1, 2, 3]])
+                assembly = ColorContactForces(model, graph, ccd, error, k_barrier=100.)
+                assembly.refresh()
+                graph.current_color.fill_(int(graph.colors.numpy()[0]))
+                force = wp.zeros(4, wp.vec3, device=device)
+                hessian = wp.zeros(4, wp.mat33, device=device)
+                assembly.assemble(model.particle_q, model.particle_q, .01,
+                                  .002, 0., .01, force, hessian)
+                self.assertEqual(int(error.numpy()[0]), 0)
+                self.assertEqual(int(assembly.pending_count.numpy()[0]), 1)
+                self.assertGreater(float(force.numpy()[0, 2]), 0.)
+                self.assertGreater(float(hessian.numpy()[0, 2, 2]), 0.)
+
+
 if __name__ == "__main__":
     unittest.main()

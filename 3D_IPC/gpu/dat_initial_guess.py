@@ -49,7 +49,6 @@ def prepare(solver, vertex_capacity, edge_capacity):
         topological_contact_filter_threshold=0)
     contacts = ContactBackend(model, detector.collision_info,
         d_hat=float(p.get('d_hat', .002)), k_barrier=0.0,
-        exact_geometry=p.get('exact_computation_fallback', True),
         node_body=getattr(model.ipc, 'node_body', None),
         error=solver.error, track_query_epoch=True)
     backend = CcdBackend(contacts, node_box_radius=p.get('node_box_max', .01),

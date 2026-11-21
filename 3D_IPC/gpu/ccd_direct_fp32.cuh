@@ -261,11 +261,6 @@ IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q) {
     float threshold;
     if (!prepare_axis(q, axis, threshold)) return 0.0f;
 
-    // interpolate(1) returns the represented endpoint exactly. If another
-    // pair reduces this full proposal, the batch MUST certify that shortened
-    // stored endpoint; this fast acceptance does not claim a rounding envelope.
-    if (certify_axis(q, axis, threshold)) return 1.0f;
-
     const int split = q.vertex_face ? 1 : 2;
     float moving_gap = infinity();
     for (int a = 0; a < split; ++a) for (int b = split; b < 4; ++b) {
@@ -281,6 +276,9 @@ IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q) {
     const float numerator = subtract_bound(subtract_bound(moving_gap, threshold, false), e0, false);
     const float denominator = add_bound(closing, e1, true);
     if (!finite(numerator) || !finite(denominator) || !(numerator > 0.0f)) return 0.0f;
+    // The batch takes a minimum across pairs. A full proposal must cover all
+    // smaller, rounded prefixes as well as the original endpoint at beta=1.
+    if (numerator > denominator && certify_axis(q, axis, threshold)) return 1.0f;
     float fraction = denominator > 0.0f ? divide_down(numerator, denominator) : 1.0f;
     fraction = minimum(1.0f, maximum(0.0f, fraction));
     // Strictly interior, including when downward division happened to be

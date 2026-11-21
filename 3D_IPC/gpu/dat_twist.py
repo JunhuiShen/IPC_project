@@ -289,7 +289,8 @@ def run_own(arguments, *, enable_planar_dat=True, enable_broad_phase_boxes=False
         newton.solvers.SolverVBD = original_solver
 
 
-def run_gs(arguments, *, enable_collisions=True, accept_uncertified=False, guess_accept_uncertified=False):
+def run_gs(arguments, *, enable_collisions=True, ccd_method=None, accept_uncertified=False,
+           guess_accept_uncertified=False):
     """Run the unchanged stock scene with our GS update and energy kernels."""
     from .solver import SolverIPC
     import newton.solvers
@@ -299,6 +300,8 @@ def run_gs(arguments, *, enable_collisions=True, accept_uncertified=False, guess
 
     def gs_solver(model, **stock_options):
         attach_stock_ipc(model, gs_predictor="level" if guess_accept_uncertified else "colored")
+        if ccd_method is not None:
+            model.ipc.params["ccd_method"] = ccd_method
         if accept_uncertified:
             model.ipc.params["gs_ccd_accept_uncertified"] = True
         if guess_accept_uncertified:

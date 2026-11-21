@@ -4,6 +4,8 @@ There are three GPU solvers: **reference DAT**, **DAT with our energies**, and
 **our Gauss–Seidel (GS) solver**. All use Newton's GPU infrastructure and
 NVIDIA Warp, which compiles the simulation kernels to CUDA.
 
+For the 2,500-vertex twist, start with the [recommended GPU benchmark command](#recommended-gpu-cloth-benchmark-with-direct-rounding-ccd).
+
 ## The three solvers
 
 | Solver | Select with | Energies and contact | Supported scenes in this driver |
@@ -120,7 +122,27 @@ The build produces a Python launcher, `3D_sim_gpu`, and the C++ scene exporter,
 
 ## Run
 
-All commands below run from `3D_IPC/`.
+Run the repository launchers from `3D_IPC/`.
+
+### Recommended GPU cloth benchmark with direct-rounding CCD
+
+Use this configuration for the 2,500-vertex twisting-cloth benchmark. It runs
+Gauss–Seidel with three substeps per frame and three iterations per substep.
+Enable stalled-step fallback for both the level-based guess and the GS updates,
+and turn off the extra CCD endpoint check.
+
+Run the command below on `biot.math.ucdavis.edu`. The 480-frame benchmark
+averaged 57.54 s of solver time on the RTX 6000 Ada.
+
+```bash
+cd ~/ipc_runs/profile_direct_gs.PjqfuZ/stock
+source ../env.sh
+out=$(mktemp -d "$PWD/repeat.XXXXXX")
+"$GPU_PY" -B run_twist.py --output "$out/run.npz" \
+  --frames 480 --substeps 3 --iterations 3 --ccd-method direct_rounding \
+  --gs-stalled-step-fallback true --guess-stalled-step-fallback true \
+  --exact-computation-fallback false
+```
 
 ### Compare the two DAT variants
 
@@ -412,9 +434,8 @@ For native scene runs:
 
 State and local systems use float32. Our GPU CCD also uses float32 throughout
 its trajectory certificates, step fractions and endpoint interpolation, with
-outward-rounded bounds in [ccd_fp32.cuh](ccd_fp32.cuh). An uncertain moving
-trajectory is shortened and its represented endpoint checked again; if it
-cannot be certified, the update can stop at its starting position. CCD has no
+outward-rounded bounds in [ccd_fp32.cuh](ccd_fp32.cuh). CCD can shorten the
+motion or stop at its starting position when it cannot prove separation. CCD has no
 float64 or exact-arithmetic fallback. Very small gaps, degenerate geometry or
 large coordinate offsets can therefore produce smaller accepted steps than
 the previous higher-precision implementation.
@@ -422,10 +443,13 @@ the previous higher-precision implementation.
 The reference DAT GPU kernels also use float32. Their plane-based truncation
 is a different motion-limiting algorithm, so equal precision does not imply
 equal cost or accepted steps. Our DAT variant's `contact_precision` option
-controls the scalar IPC barrier evaluation, independently of CCD. Existing
-`exact_computation_fallback` and `ccd_exact_step_bound` scene settings no longer
-select higher-precision CCD; the former still affects other contact geometry.
-Other geometry and energy routines may continue to use higher precision.
+controls the scalar IPC barrier evaluation independently of CCD. Deformable
+GS always uses project contact geometry and full barrier gradients and Hessians,
+with exact replay for unresolved contact geometry. Its level-based predictor
+always uses contact-incidence ordering within each color. For GS
+`direct_rounding`, `exact_computation_fallback=true` adds a separate FP32
+check of shortened stored endpoints. Both settings use the same direct
+fraction solve and rounding bounds.
 Shared broad-phase movement radii are converted inward from their float64
 storage before CCD uses them.
 
@@ -446,9 +470,10 @@ when FP32 feature classification chooses an unsuitable axis. The plane method
 can accept such moves by testing additional separating directions. Both
 remain available; selecting a method can change the trajectory and contact work.
 
-Both use independent per-vertex fractions and verify shortened stored endpoints
-after reducing all incident contacts. They use neither bisection nor a
-higher-precision fallback; an uncertified move stays at the starting position.
+Both reduce the incident pairs' fractions per vertex. The direct-rounding
+proposal covers every rounded prefix up to its returned fraction, including
+prefixes shortened by another pair. Plane CCD verifies shortened endpoints
+after reduction. These CCD certificates and endpoint checks use FP32.
 Both conservatively require a fixed direction to certify the full `1e-7`
 gap floor. In particular, they do not reproduce the CPU fallback's exact
 `min(starting gap, gap floor)` policy for starts below that floor. The

@@ -1,9 +1,9 @@
 """Represented-trajectory CCD, predictors' acceptance, and GS independent steps.
 
-All trajectory certificates, backtracking and accepted motion use FP32.
-Uncertain moving paths are shortened, down to a stationary update if necessary;
-there is no FP64 or exact-arithmetic CCD fallback. Every shortened endpoint is
-certified again before commit. Legacy resolver names remain API aliases.
+Trajectory certificates, backtracking and interpolation use FP32. Direct
+rounding certifies the proposed fraction and all shorter rounded prefixes.
+Its optional endpoint recheck is controlled by the exact fallback scene flag.
+Legacy resolver names remain API aliases.
 """
 
 from __future__ import annotations
@@ -224,6 +224,29 @@ def _restore_stalled_proposals(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3
                 rejected[i] = 0
 
 
+@wp.kernel(module="unique", enable_backward=False)
+def _commit_direct(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], fractions: wp.array[float],
+                   unclipped: wp.array[wp.vec3], rejected: wp.array[int], attempts: wp.array[int],
+                   verified: wp.array[int], error: wp.array[int]):
+    i = wp.tid()
+    if i == 0:
+        attempts[0] = 1
+        verified[0] = 1
+    if i < q.shape[0]:
+        rejected[i] = 0
+        proposal = candidate[i]
+        if unclipped.shape[0] != 0:
+            unclipped[i] = proposal
+        if error[0] == 0:
+            point = proposal
+            if fractions[i] < 1.0:
+                point = interpolate_positions(q[i], proposal, fractions[i])
+                if unclipped.shape[0] != 0 and point == q[i]:
+                    point = proposal
+            candidate[i] = point
+            q[i] = point
+
+
 class CcdBackend:
     def __init__(self, contacts, *, node_box_radius=0.01, exact_geometry=True, max_rounds=128,
                  exact_step_bound=None, error=None, group_query_block_dim=32):
@@ -309,7 +332,8 @@ class CcdBackend:
                 [q, proposed, reference, float(radius32), radius_array, int(radii is not None),
                  int(bounded), selected_colors, self.model.particle_flags,
                  self.model.particle_mass, int(color), view_groups, current_group, 1, int(current_color is not None), view_epoch, c.query_epoch,
-                 self.candidate, self.error], device=self.device)
+                 self.candidate, self.node_fractions if clip_ccd and self.method != "interval" else None,
+                 self.error], device=self.device)
         else:
             wp.launch(_prepare, q.shape[0],
                 [q, proposed, reference, float(radius32), radius_array, int(radii is not None),
@@ -319,17 +343,24 @@ class CcdBackend:
             self.verified.fill_(1)
             wp.launch(_commit, q.shape[0], [self.candidate, q, self.verified, self.error], device=self.device)
             return q
-        if unclipped is not None:
+        direct_commit = self.method == "direct_rounding" and not self.exact_geometry
+        if unclipped is not None and not direct_commit:
             wp.copy(unclipped, self.candidate)
         if self.method != "interval":
             propose, verify, publish = get_plane_kernels(self.method)
-            self.node_fractions.fill_(1.0)
-            self.plane_rejected.zero_()
             args = [q, self.candidate, ids, self.model.tri_indices, self.model.edge_indices,
                     c.info, offsets, current_group, c.fast_workers, self.node_fractions]
             if c.capacity:
                 wp.launch(propose, c.fast_workers, args + [self.error], device=self.device,
                           block_dim=self.group_query_block_dim)
+            if direct_commit:
+                # All incident pairs have published their bounds. No other
+                # vertex reads this endpoint until the next color.
+                wp.launch(_commit_direct, max(1, q.shape[0]),
+                          [q, self.candidate, self.node_fractions, unclipped, self.plane_rejected,
+                           self.attempts, self.verified, self.error], device=self.device)
+                return q
+            self.plane_rejected.zero_()
             wp.launch(get_independent_shortener(), q.shape[0],
                       [q, self.candidate, self.node_fractions, self.error], device=self.device)
             if c.capacity:
@@ -716,5 +747,5 @@ def __getattr__(name):
 
 
 # Fast kernels share this source file but never a cold compilation unit.
-for _kernel in (_prepare, _begin, _begin_round, _certify, _shorten, _next, _commit, _restore_stalled_proposals):
+for _kernel in (_prepare, _begin, _begin_round, _certify, _shorten, _next, _commit, _restore_stalled_proposals, _commit_direct):
     configure_module(_kernel, mode="fast")

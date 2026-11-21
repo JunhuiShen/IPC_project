@@ -79,8 +79,10 @@ def prepare_grouped(q: wp.array[wp.vec3], proposed: wp.array[wp.vec3], center: w
               bounded: int, colors: wp.array[int], flags: wp.array[int], mass: wp.array[float],
               color: int, view_groups: wp.array[int], current_group: wp.array[int], use_view: int, select_group: int,
               view_epoch: wp.array[wp.uint64], current_epoch: wp.array[wp.uint64],
-              candidate: wp.array[wp.vec3], error: wp.array[int]):
+              candidate: wp.array[wp.vec3], initial_fractions: wp.array[float], error: wp.array[int]):
     i = wp.tid()
+    if initial_fractions.shape[0] != 0:
+        initial_fractions[i] = 1.0
     if use_view != 0 and i == 0:
         if view_epoch[0] != current_epoch[0]:
             wp.atomic_max(error, 0, 11)

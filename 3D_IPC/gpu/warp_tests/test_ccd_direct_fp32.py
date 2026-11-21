@@ -315,6 +315,34 @@ class Float32DirectWarpTests(unittest.TestCase):
                         cases.append((data.start[:4], actual[:4], int(edge), 1e-7))
             self.assert_exact_committed(cases)
 
+    def test_direct_commit_keeps_partial_steps_and_restores_only_stalled_steps(self):
+        from gpu.ccd import CcdBackend
+        from .test_ccd_independent import accept, fixture
+        for device in self.devices:
+            for height in (0.0, 0.1):
+                for fallback in (False, True):
+                    data = fixture(device, height=height)
+                    data.model.ipc = SimpleNamespace(params={"ccd_method": "direct_rounding"})
+                    backend = CcdBackend(data.contacts, node_box_radius=2, exact_geometry=False)
+                    proposed = data.start.copy()
+                    proposed[0, 2] = -0.1
+                    proposed[4, 0] += 0.25
+                    saved = wp.empty_like(data.q) if fallback else None
+                    accept(data, backend, wp.array(proposed, wp.vec3, device=device),
+                           bounded=False, unclipped=saved)
+                    backend.check()
+                    actual = data.q.numpy()
+                    if fallback:
+                        np.testing.assert_array_equal(saved.numpy(), proposed)
+                    if height == 0.0:
+                        expected = proposed[0] if fallback else data.start[0]
+                        np.testing.assert_array_equal(actual[0], expected)
+                    else:
+                        self.assertGreater(actual[0, 2], 0.0)
+                        self.assertLess(actual[0, 2], height)
+                    np.testing.assert_array_equal(actual[1:], proposed[1:])
+                    np.testing.assert_array_equal(backend.candidate.numpy(), actual)
+
     def test_opt_in_backend_rejects_two_movers_before_any_commit(self):
         from gpu.ccd import CcdBackend
         from .test_ccd_independent import accept, fixture
@@ -388,10 +416,10 @@ class Float32DirectWarpTests(unittest.TestCase):
         from .test_ccd_independent import accept
         for device in self.devices:
             cases = []
-            for large in (False, True):
+            for exact, large in ((False, False), (False, True), (True, False), (True, True)):
                 outputs = []
                 for reverse in (False, True):
-                    with self.subTest(device=str(device), large=large, reverse=reverse):
+                    with self.subTest(device=str(device), exact=exact, large=large, reverse=reverse):
                         plane = np.float32(100000 if large else 0)
                         ulp = np.nextafter(plane, np.float32(np.inf)) - plane if large else np.float32(.05)
                         planes = [plane, plane + ulp] if large else [plane, plane - ulp]
@@ -423,7 +451,7 @@ class Float32DirectWarpTests(unittest.TestCase):
                         current = wp.zeros(1, int, device=device)
                         data = SimpleNamespace(q=q, colors=colors, current=current, view=bank.view(current))
                         proposed = start.copy(); proposed[0, 2] = target; proposed[7, 0] += np.float32(.25)
-                        backend = CcdBackend(contacts, node_box_radius=2)
+                        backend = CcdBackend(contacts, node_box_radius=2, exact_geometry=exact)
                         accept(data, backend, wp.array(proposed, wp.vec3, device=device), bounded=False)
                         backend.check()
                         actual = q.numpy()

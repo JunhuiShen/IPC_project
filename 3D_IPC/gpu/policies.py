@@ -135,11 +135,11 @@ def _color_graph(rows: wp.array[wp.uint64], adjacency: wp.array[int], colors: wp
 
 
 @wp.kernel
-def _trial_keys(colors: wp.array[int], incidence: wp.array[wp.uint64], flags: wp.array[int], heavy: int,
+def _trial_keys(colors: wp.array[int], incidence: wp.array[wp.uint64], flags: wp.array[int],
                   keys: wp.array[wp.int64], values: wp.array[int]):
     i = wp.tid()
     weight = wp.uint64(0)
-    if heavy != 0 and flags[i] & 1 != 0:
+    if flags[i] & 1 != 0:
         weight = incidence[i]
     keys[i] = wp.int64(colors[i]) * wp.int64(4294967296) + wp.int64(4294967295) - wp.int64(weight)
     values[i] = i
@@ -293,7 +293,7 @@ class PredictorGraph:
         return [self.rows, self.adjacency, self.colors, self.seen, self.levels, self.component, self.queue,
                 self.trial_order, self.order, self.offsets, self.level_offsets, self.metadata]
 
-    def build(self, contacts, heavy):
+    def build(self, contacts):
         self.bits.zero_(); self.counts.zero_(); self.incidence.zero_()
         wp.launch(_bit_edges, contacts.fast_workers,
             [contacts.model.tri_indices, contacts.model.edge_indices, contacts.info, contacts.candidate_ids,
@@ -306,7 +306,7 @@ class PredictorGraph:
         else:
             self._parallel_colors.apply(contacts)
         wp.launch(_trial_keys, self.n,
-            [self.colors, self.incidence, contacts.model.particle_flags, int(heavy), self.keys, self.values], device=self.device)
+            [self.colors, self.incidence, contacts.model.particle_flags, self.keys, self.values], device=self.device)
         wp.utils.radix_sort_pairs(self.keys, self.values, self.n)
         wp.launch(_trial_order, self.n, [self.values, self.trial_order], device=self.device)
 
@@ -419,7 +419,7 @@ class InitialGuess:
         if self.graph is None:
             raise RuntimeError("Prepare colored predictor workspaces before CUDA graph capture")
         g = self.graph
-        g.build(c, bool(self.ccd.exact_geometry))
+        g.build(c)
         if self.query_groups is not None:
             self.query_groups.build(g.colors)
         colors = g.colors

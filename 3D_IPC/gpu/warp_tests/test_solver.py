@@ -142,6 +142,7 @@ class SolverIntegrationTests(unittest.TestCase):
             np.testing.assert_array_equal(after.particle_qd.numpy(), 0.0)
 
     def test_captured_empty_mesh_pass_skips_all_stages_and_recovers_for_live_contacts(self):
+        from gpu.contact import _evaluate_grouped
         from .test_solver_dat import point_over_triangle
         if not wp.get_cuda_devices():self.skipTest("No CUDA device")
         for device in wp.get_cuda_devices():
@@ -154,9 +155,7 @@ class SolverIntegrationTests(unittest.TestCase):
                 solver.skip_empty_mesh_contacts = skip
                 backend = solver.contact_backend
                 fast = backend._grouped_fast
-                # DAT energy assembly is one fused native stage; the project
-                # evaluator has fast, ordinary and exact replay stages.
-                targets = ((backend._dat_energy.kernel,) if backend._dat_energy is not None
+                targets = ((_evaluate_grouped, backend._resolve_grouped) if fast is None
                            else (fast._fast, fast._ordinary, backend._resolve_grouped))
                 counts = wp.zeros(len(targets), int, device=device)
                 launch = wp.launch
