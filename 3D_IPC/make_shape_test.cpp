@@ -22,6 +22,18 @@
 
 namespace {
 
+std::filesystem::path hyperboloid_test_asset_directory() {
+    const auto root = std::filesystem::path(__FILE__).parent_path() / "example_obj";
+    for (const char* name : {"hyperboloid_gears", "hyperboloid_gears "}) {
+        const auto candidate = root / name;
+        if (std::filesystem::is_regular_file(candidate / "out" / "gear1_crank.obj")
+            && std::filesystem::is_regular_file(candidate / "out" / "gear2.obj")
+            && std::filesystem::is_regular_file(candidate / "out" / "stand.obj"))
+            return candidate;
+    }
+    return root / "hyperboloid_gears";
+}
+
 void expect_sdf_material_pose_near(
     const SDFMaterialPose& actual,
     const SDFMaterialPose& expected,
@@ -6351,6 +6363,220 @@ TEST(AnchorExample, ExplicitFlagsOverrideMotorAndSolverPresets) {
     EXPECT_DOUBLE_EQ(args.kpin, 12345.0);
     EXPECT_EQ(args.substeps, 1);
     EXPECT_EQ(args.max_substep_iters, 2);
+}
+
+TEST(HyperboloidGearsExample, PreservesAuthoredAssemblyAndDrivesOnlyHandleFromRest) {
+    IPCArgs3D args;
+    char program[] = "3D_sim", flag[] = "--example", scene[] = "21";
+    char* argv[] = {program, flag, scene};
+    ASSERT_TRUE(args.parse(3, argv));
+    args.datadir = hyperboloid_test_asset_directory().string();
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    auto params = args.to_sim_params();
+    build_hyperboloid_gears_example(args, mesh, state, X, pins, params);
+
+    ASSERT_EQ(mesh.rb_nodes.size(), 3U);
+    ASSERT_EQ(mesh.rb_update_modes.size(), 3U);
+    EXPECT_EQ(mesh.rb_update_modes[0], RigidBodyUpdateMode::TranslationAndOrientation);
+    EXPECT_EQ(mesh.rb_update_modes[1], RigidBodyUpdateMode::TranslationAndOrientation);
+    EXPECT_EQ(mesh.rb_update_modes[2], RigidBodyUpdateMode::None);
+    EXPECT_TRUE(X.empty());
+    EXPECT_TRUE(pins.empty());
+    EXPECT_TRUE(mesh.deformable_nodes.empty());
+    EXPECT_TRUE(mesh.tets.empty());
+    EXPECT_TRUE(params.sdf_planes.empty());
+    EXPECT_TRUE(params.sdf_cylinders.empty());
+    EXPECT_TRUE(params.sdf_spheres.empty());
+    EXPECT_DOUBLE_EQ(params.rigid_pin_time, 0.0);
+
+    const auto directory = hyperboloid_test_asset_directory() / "out";
+    const char* filenames[] = {"gear1_crank.obj", "gear2.obj", "stand.obj"};
+    for (int body = 0; body < 3; ++body) {
+        SCOPED_TRACE(filenames[body]);
+        std::vector<Vec3> source;
+        std::vector<int> triangles;
+        load_obj_mesh((directory / filenames[body]).string(), source, triangles);
+        ASSERT_EQ(source.size(), mesh.rb_nodes[body].size());
+        double signed_volume_mm3 = 0.0;
+        Vec3 first_moment_mm4 = Vec3::Zero();
+        for (std::size_t i = 0; i < triangles.size(); i += 3) {
+            const Vec3& a = source[triangles[i]];
+            const Vec3& b = source[triangles[i + 1]];
+            const Vec3& c = source[triangles[i + 2]];
+            const double volume = a.dot(b.cross(c)) / 6.0;
+            signed_volume_mm3 += volume;
+            first_moment_mm4 += volume * (a + b + c) / 4.0;
+        }
+        ASSERT_GT(signed_volume_mm3, 0.0);
+        const double expected_mass = args.rigid_density * signed_volume_mm3 * 1.0e-9;
+        EXPECT_NEAR(mesh.total_mass[body], expected_mass, 1.0e-10 * expected_mass);
+        const Vec3 source_com = first_moment_mm4 / signed_volume_mm3;
+        const Vec3 expected_com = 0.001 * Vec3(source_com.x(), source_com.z(), -source_com.y());
+        EXPECT_LT((state.x_coms[body] - expected_com).norm(), 1.0e-12);
+        for (std::size_t local = 0; local < source.size(); ++local) {
+            const int node = mesh.rb_nodes[body][local];
+            const Vec3& p = source[local];
+            const Vec3 expected = 0.001 * Vec3(p.x(), p.z(), -p.y());
+            EXPECT_LT((state.deformed_positions[node] - expected).norm(), 1.0e-12);
+            EXPECT_EQ(mesh.node_to_rb[node], body);
+        }
+    }
+
+    const Vec3 axes[] = {Vec3(std::sqrt(3.0) / 2.0, 0.5, 0.0),
+                         Vec3(std::sqrt(3.0) / 2.0, -0.5, 0.0)};
+    const Vec3 hinges[] = {Vec3::Zero(), Vec3(0.0, 0.0, -0.05)};
+    const double omega = args.hyperboloid_drive_speed * M_PI / 180.0;
+    // The fused handle puts the crank COM off its hinge. Fixing the COM would
+    // rotate the shaft out of its bearing even with the right angular speed.
+    EXPECT_GT((state.x_coms[0] - hinges[0]).cross(axes[0]).norm(), 0.0009);
+    // The motor starts the assembly through its handle spring, with no
+    // prescribed whole-body angular or translational velocity.
+    for (int body = 0; body < 3; ++body) {
+        EXPECT_TRUE(state.omega[body].isZero());
+        EXPECT_TRUE(state.v_coms[body].isZero());
+    }
+    for (const Vec3& velocity : state.velocities) EXPECT_TRUE(velocity.isZero());
+
+    ASSERT_EQ(params.rigid_pins.size(), 5U);
+    EXPECT_DOUBLE_EQ(args.hyperboloid_motor_radius, 0.048);
+    int motor_count = 0;
+    int hinge_counts[2] = {0, 0};
+    for (const RigidPin& pin : params.rigid_pins) {
+        ASSERT_GE(pin.body, 0);
+        ASSERT_LT(pin.body, 2);
+        const int body = pin.body;
+        const Vec3 material_point = state.x_coms[body]
+            + quaternion_rotate(state.orientations[body], pin.local_position);
+        EXPECT_LT((material_point - pin.initial_target).norm(), 1.0e-13);
+        EXPECT_LT((rigid_pin_target_position(pin, 0.0) - material_point).norm(), 1.0e-13);
+        if (pin.angular_velocity_z != 0.0) {
+            ++motor_count;
+            EXPECT_EQ(body, 0);
+            EXPECT_DOUBLE_EQ(pin.angular_velocity_z, omega);
+            EXPECT_LT((pin.rotation_axis - axes[0]).norm(), 1.0e-14);
+            EXPECT_LT((pin.rotation_center - hinges[0]).norm(), 1.0e-14);
+            // Authored grip spans sim-frame z=[112.5,157.5] mm at x=48 mm.
+            // Its midpoint maps to 135 mm along the shaft and -48 mm in Z.
+            const Vec3 grip_midpoint = 0.135 * axes[0] - 0.048 * Vec3::UnitZ();
+            EXPECT_LT((material_point - grip_midpoint).norm(), 1.0e-13);
+            EXPECT_NEAR((material_point - hinges[0]).cross(axes[0]).norm(), 0.048, 1.0e-13);
+            const Vec3 expected = hinges[0]
+                + Eigen::AngleAxisd(0.75 * omega, axes[0]) * (material_point - hinges[0]);
+            EXPECT_LT((rigid_pin_target_position(pin, 0.75) - expected).norm(), 1.0e-13);
+        } else {
+            ++hinge_counts[body];
+            const Vec3 offset = material_point - hinges[body];
+            EXPECT_LT(offset.cross(axes[body]).norm(), 1.0e-13);
+            EXPECT_NEAR(offset.norm(), args.hyperboloid_shaft_span, 1.0e-13);
+            EXPECT_LT((rigid_pin_target_position(pin, 0.75) - material_point).norm(), 1.0e-13);
+            // Either gear can rotate freely about its shaft without moving
+            // the stationary support material points.
+            const Vec3 rotated = hinges[body] + Eigen::AngleAxisd(0.63, axes[body]) * offset;
+            EXPECT_LT((rotated - material_point).norm(), 1.0e-13);
+        }
+    }
+    EXPECT_EQ(motor_count, 1);
+    EXPECT_EQ(hinge_counts[0], 2);
+    EXPECT_EQ(hinge_counts[1], 2);
+
+    // At the initial pose, moving only the grip target produces the entire
+    // drive force and torque; the support targets and passive gear add none.
+    params.rigid_pin_time = 0.75;
+    const double dt = 1.0 / (args.fps * args.substeps);
+    const auto derivatives = rigid_pin_derivatives(
+        0, state.x_coms[0], state.orientations[0], Vec3::Zero(), params, dt);
+    const auto motor = std::find_if(params.rigid_pins.begin(), params.rigid_pins.end(),
+        [](const RigidPin& pin) { return pin.angular_velocity_z != 0.0; });
+    ASSERT_NE(motor, params.rigid_pins.end());
+    const Vec3 grip = state.x_coms[0]
+        + quaternion_rotate(state.orientations[0], motor->local_position);
+    const Vec3 force = params.kpin
+        * (rigid_pin_target_position(*motor, params.rigid_pin_time) - grip);
+    const Vec3 torque = (grip - state.x_coms[0]).cross(force);
+    EXPECT_GT(force.norm(), 0.0);
+    EXPECT_GT(torque.dot(axes[0]), 0.0);
+    EXPECT_LT((derivatives.translation_gradient + dt * dt * force).norm(), 1.0e-14);
+    EXPECT_LT((derivatives.orientation_gradient + dt * dt * dt * torque).norm(), 1.0e-14);
+    params.rigid_pins.erase(motor);
+    for (int body = 0; body < 2; ++body) {
+        const auto supports = rigid_pin_derivatives(
+            body, state.x_coms[body], state.orientations[body], Vec3::Zero(), params, dt);
+        EXPECT_LT(supports.translation_gradient.norm(), 1.0e-14);
+        EXPECT_LT(supports.orientation_gradient.norm(), 1.0e-14);
+    }
+}
+
+TEST(HyperboloidGearsExample, ZeroSpeedFixesCrankAndLeavesFollowerFreeOnItsHinge) {
+    IPCArgs3D args;
+    args.hyperboloid_drive_speed = 0.0;
+    args.datadir = hyperboloid_test_asset_directory().string();
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    auto params = args.to_sim_params();
+    build_hyperboloid_gears_example(args, mesh, state, X, pins, params);
+    ASSERT_EQ(mesh.rb_update_modes.size(), 3U);
+    EXPECT_EQ(mesh.rb_update_modes[0], RigidBodyUpdateMode::None);
+    EXPECT_EQ(mesh.rb_update_modes[1], RigidBodyUpdateMode::TranslationAndOrientation);
+    EXPECT_EQ(mesh.rb_update_modes[2], RigidBodyUpdateMode::None);
+    ASSERT_EQ(params.rigid_pins.size(), 2U);
+    for (const RigidPin& pin : params.rigid_pins) {
+        EXPECT_EQ(pin.body, 1);
+        EXPECT_DOUBLE_EQ(pin.angular_velocity_z, 0.0);
+    }
+    for (int body = 0; body < 3; ++body) {
+        EXPECT_TRUE(state.omega[body].isZero());
+        EXPECT_TRUE(state.v_coms[body].isZero());
+    }
+}
+
+TEST(HyperboloidGearsExample, RejectsInvalidMotorAndHingeInputs) {
+    IPCArgs3D args;
+    RefMesh mesh;
+    DeformedState state;
+    std::vector<Vec2> X;
+    std::vector<Pin> pins;
+    auto params = args.to_sim_params();
+    args.hyperboloid_drive_speed = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_THROW(build_hyperboloid_gears_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    args.hyperboloid_drive_speed = 30.0;
+    args.hyperboloid_motor_radius = 0.0;
+    EXPECT_THROW(build_hyperboloid_gears_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    args.hyperboloid_motor_radius = 0.048;
+    args.hyperboloid_shaft_span = -1.0;
+    EXPECT_THROW(build_hyperboloid_gears_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    args.hyperboloid_shaft_span = 0.06;
+    params.kpin = 0.0;
+    EXPECT_THROW(build_hyperboloid_gears_example(args, mesh, state, X, pins, params), std::invalid_argument);
+    // The follower hinge needs spring stiffness even when the crank is fixed.
+    args.hyperboloid_drive_speed = 0.0;
+    EXPECT_THROW(build_hyperboloid_gears_example(args, mesh, state, X, pins, params), std::invalid_argument);
+}
+
+TEST(HyperboloidGearsExample, ExplicitFlagsOverrideMotorAndSolverPresets) {
+    IPCArgs3D args;
+    std::vector<std::string> values = {"3D_sim", "--example", "21",
+        "--hyperboloid_drive_speed", "-45", "--hyperboloid_motor_radius", "0.03",
+        "--hyperboloid_shaft_span", "0.075", "--rigid_density", "1100",
+        "--kpin", "12345", "--d_hat", "0.00002", "--substeps", "2",
+        "--max_substep_iters", "3", "--gy", "0", "--fixed_iters", "false"};
+    std::vector<char*> argv;
+    for (auto& value : values) argv.push_back(value.data());
+    ASSERT_TRUE(args.parse(static_cast<int>(argv.size()), argv.data()));
+    EXPECT_DOUBLE_EQ(args.hyperboloid_drive_speed, -45.0);
+    EXPECT_DOUBLE_EQ(args.hyperboloid_motor_radius, 0.03);
+    EXPECT_DOUBLE_EQ(args.hyperboloid_shaft_span, 0.075);
+    EXPECT_DOUBLE_EQ(args.rigid_density, 1100.0);
+    EXPECT_DOUBLE_EQ(args.kpin, 12345.0);
+    EXPECT_DOUBLE_EQ(args.d_hat, 0.00002);
+    EXPECT_EQ(args.substeps, 2);
+    EXPECT_EQ(args.max_substep_iters, 3);
+    EXPECT_DOUBLE_EQ(args.gy, 0.0);
+    EXPECT_FALSE(args.fixed_iters);
 }
 
 

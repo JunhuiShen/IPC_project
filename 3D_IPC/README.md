@@ -129,7 +129,7 @@ sources, with `-fno-lto` on those sources under GCC.
 
 ## Built-in scenes
 
-Select a scene with `--example N`; IDs run consecutively from 1 to 20.
+Select a scene with `--example N`; IDs run consecutively from 1 to 21.
 Categories describe the simulated material models: **cloth** uses shell
 meshes, **rigid body** uses rigid motion, and **solid** uses deformable
 tetrahedral meshes. **Mixed** scenes below contain cloth, rigid bodies, and
@@ -158,10 +158,11 @@ There is no solid-only scene among the categorized examples.
 | 18 | Rigid body only | Bike-chain assembly with 138 separate rigid bodies and 47,761 vertices, driven by moving spring pins on the large sprocket; both sprocket centers are fixed by default and gravity is disabled. Optional tensioning allows the large sprocket to translate. |
 | 19 | Rigid body only | A world-X spool motor winds free chain links and lifts a rigid anchor. |
 | 20 | Rigid body only | Free rigid stones settle into a standing arch under gravity with friction. |
+| 21 | Rigid body only | A driven crank turns a hyperboloid gear pair on a fixed stand; tooth contact drives the second gear. |
 
 ### Scene assets
 
-Examples 8–10, 13 and 16–20 use the supplied `example_obj/` assets. Paths below are
+Examples 8–10, 13 and 16–21 use the supplied `example_obj/` assets. Paths below are
 relative to **`3D_IPC/`**, so keep that working directory when running them.
 See the [asset README](example_obj/README.md) for mesh credits and license references.
 
@@ -175,6 +176,7 @@ See the [asset README](example_obj/README.md) for mesh credits and license refer
 | 18 | `example_obj/bike_chain/initial_bodies.txt` and the original `link.obj`, `barring.obj`, `pin.obj`, `sprocket-20teeth.obj` and `sprocket-8teeth.obj` in the same folder. `--datadir` may point to `example_obj` or its `bike_chain` folder. |
 | 19 | `example_obj/anchor/anchor.obj`, `spool.obj` and `example_obj/wrecking_ball/link.obj`; `--datadir` accepts `example_obj` or its `anchor` folder. |
 | 20 | `example_obj/arch/num_stones=101/stone-01.obj` through `stone-101.obj` and `example_obj/arch/plane.obj`; `--datadir` accepts `example_obj` or its `arch` folder. |
+| 21 | `example_obj/hyperboloid_gears/out/gear1_crank.obj`, `gear2.obj`, and `stand.obj`; `--datadir` accepts `example_obj` or its `hyperboloid_gears` folder. |
 
 Example 4 needs a directory supplied with `--datadir`, containing
 `dress_0000.obj`; the `body_0000.obj` loader is currently disabled. Other scenes
@@ -415,7 +417,7 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=ACTIVE OMP_PROC_BIND=spread
 
 ```
 
-Examples 8–20 use the following scene commands:
+Examples 8–21 use the following scene commands:
 
 ```bash
 # Example 8: Bunny/Spot solids with rigid cubes and gears
@@ -619,7 +621,32 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --use_simd true \
   --exact_computation_fallback false \
   --outdir arch_frictionless_output
+
+# Example 21: crank-driven hyperboloid gears (starting settings)
+./build/3D_sim --example 21 --datadir example_obj \
+  --num_frames 360 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters \
+  --hyperboloid_drive_speed 30 --d_hat 0.0001 --k_barrier 1e5 --kpin 1e5 \
+  --outdir hyperboloid_gears_output --format geo
 ```
+
+Example 21 has three rigid bodies: the fused handle, crank, shaft, and first
+gear; the passive second gear; and the fixed stand. One moving spring pin at
+the handle grip pulls it around the shaft. The rigid connection turns the first
+gear, and tooth contact turns the passive gear. Each gear has two stationary
+shaft pins that resist sliding and tilting while allowing shaft rotation.
+Both gears start at rest; the solver updates their poses from pin forces,
+gravity, inertia, and contact. `--hyperboloid_drive_speed`
+sets the crank speed in degrees/second (default 30; zero fixes the crank).
+`--hyperboloid_motor_radius` (default 0.048 m) places the single drive point at
+the grip centre, 0.135 m along the shaft from the hinge. Changing this parameter
+moves the virtual drive point radially and may take it outside the grip.
+`--hyperboloid_shaft_span` (default 0.06 m) sets the shaft support half-span;
+`--kpin` controls both motor and support stiffness. The
+command above shows the scene's starting presets; explicit flags override them.
+The loader converts the authored millimeter, Z-up assembly to meters, Y-up via
+`(x, y, z) -> 0.001 * (x, z, -y)`. Hinge geometry is fixed in the example using
+the bundled `hyperboloid_gears/out/scene.json` values. The loader also accepts
+the updated asset folder named `hyperboloid_gears ` (with a trailing space).
 
 ### DAT scene commands
 
@@ -735,7 +762,7 @@ fixtures; it is not needed to run simulations.
 | CMake cannot find Boost, OpenMP, or GoogleTest | Install the dependency and, for nonstandard locations, supply its CMake package/prefix path. GoogleTest can be skipped with `-DBUILD_TESTING=OFF`. |
 | First configuration cannot fetch dependencies | CMake needs Git and network access to download the pinned dependencies. |
 | A scene cannot open an OBJ or TetGen file | Run from `3D_IPC/` and check the [scene assets](#scene-assets); Example 4 needs your own `--datadir`. |
-| Startup rejects `d_hat` | Its effective value must not exceed half the shortest mesh edge. Smaller scene gaps may impose stricter limits; use the scene preset or lower it. |
+| Startup rejects `d_hat` | In scenes with deformable nodes, its effective value must not exceed half the shortest mesh edge. Pure rigid scenes exclude same-body contact and skip this edge-length check. Smaller scene gaps may impose stricter limits; use the scene preset or lower it. |
 | Results were replaced | Fresh runs recreate `outdir`; use a new folder or `--restart_frame` with an existing checkpoint. |
 | A full scene takes much longer than the quick start | Mesh resolution, substeps, and iteration counts all affect cost. Start with fewer frames; only use resolution flags belonging to that scene. |
 

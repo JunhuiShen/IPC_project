@@ -286,3 +286,10 @@ void build_arch_example(
     DeformedState& state, std::vector<Vec2>& X,
     std::vector<Pin>& pins, SimParams& params,
     std::vector<Vec3>& static_x, std::vector<int>& static_tris);
+
+// Example 21: two hyperboloid gears on soft shaft hinges and a fixed stand.
+// One moving spring target pulls the handle grip; tooth contact drives gear 2.
+void build_hyperboloid_gears_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh,
+    DeformedState& state, std::vector<Vec2>& X,
+    std::vector<Pin>& pins, SimParams& params);

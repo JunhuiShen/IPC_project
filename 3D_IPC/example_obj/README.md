@@ -4,6 +4,18 @@ This directory contains OBJ meshes and supporting geometry files used by the
 simulation examples. See the [main README](../README.md#scene-assets) for the
 assets required by each scene and how to select their paths.
 
+Example 21 uses `hyperboloid_gears/out/gear1_crank.obj`, `gear2.obj`, and
+`stand.obj` as three rigid bodies. One moving spring target inside the handle
+grip drives the fused handle/crank/shaft/first gear; tooth contact drives the
+second gear. Two stationary shaft pins support each gear, and the stand remains
+fixed. Both gears start at rest. The updated `hyperboloid_gears ` folder (with a
+trailing space) is also accepted without renaming the source assets.
+The loader preserves the assembly and converts its millimeter, Z-up coordinates
+to meters, Y-up with `(x, y, z) -> 0.001 * (x, z, -y)`; its fixed hinge geometry
+comes from the bundled `out/scene.json`. Pass `--datadir example_obj` or
+`--datadir example_obj/hyperboloid_gears`. See the
+[gear asset notes](hyperboloid_gears/README.md) for geometry details.
+
 The meshes in `bunny_coarse/` and `armadillo_coarse/` are derived from the
 Stanford Bunny and Stanford Armadillo models. We thank the Stanford University
 Computer Graphics Laboratory for making these models available through the

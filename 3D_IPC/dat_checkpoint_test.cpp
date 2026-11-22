@@ -139,7 +139,7 @@ TEST(DATCanonical, ModesAreOptInAndDedicatedSelectorsAreExclusive) {
 
 }
 
-TEST(DATCanonical, RemovedOptionsAndImportedExampleAreRejected) {
+TEST(DATCanonical, RemovedOptionsAndUnknownExampleAreRejected) {
     for (const auto& words : std::vector<std::vector<std::string>>{
             {"3D_sim", "--use_reference_dat", "true"},
             {"3D_sim", "--use_ogc_solver", "true"},
@@ -149,7 +149,7 @@ TEST(DATCanonical, RemovedOptionsAndImportedExampleAreRejected) {
             {"3D_sim", "--no_output", "true"},
             {"3D_sim", "--benchmark_json", "timings.json"},
             {"3D_sim", "--benchmark_warmup_frames", "5"},
-            {"3D_sim", "--example", "21"}}) {
+            {"3D_sim", "--example", "22"}}) {
         IPCArgs3D args;
         auto mutable_words = words;
         std::vector<char*> argv;

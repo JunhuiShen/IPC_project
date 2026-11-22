@@ -179,6 +179,11 @@ struct IPCArgs3D : ArgParser {
     double anchor_motor_radius = 2.0;
     double anchor_shaft_span = 3.0;
 
+    // Example 21: a moving spring target at the authored handle grip.
+    double hyperboloid_drive_speed = 30.0; // degrees/second; zero fixes the crank
+    double hyperboloid_motor_radius = 0.048; // metres: shaft to grip centre
+    double hyperboloid_shaft_span = 0.06; // metres from the hinge to each support
+
     // --- output / restart ---
     std::string outdir       = "frames_sim3d";
     std::string format       = "geo";
@@ -248,7 +253,7 @@ struct IPCArgs3D : ArgParser {
         add_bool  ("exact_computation_fallback", exact_computation_fallback, true, "Enable additional exact-arithmetic CCD/contact fallbacks, matching barrier/friction calculations, and colored-predictor path checks (default: true)");
         add_bool  ("ccd_exact_step_bound", ccd_exact_step_bound, false, "Experimental direct exact separating-plane gap bound before legacy backtracking; requires exact fallback with linear CCD and OGC disabled (default: false)");
 
-        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball, 17=rigid_objects_in_box, 18=bike_chain, 19=anchor, 20=arch");
+        add_int   ("example",      example,       1,              "Scene to run: 1=twisting_cloth, 2=two_cylinder_twist, 3=cylinder_twist_untwist, 4=avatar_clothing, 5=rotating_tennis_racket, 6=rotating_space_tool, 7=twenty_polygon_stack, 8=two_bunny_spot_cube_gear_cycles_on_pinned_cloth, 9=dynamic_bolt_into_fixed_nut, 10=four_bunny_spot_cube_gear_rows_on_pinned_cloth, 11=cloth_unrolling_down_fixed_ramp, 12=oscillating_cloth_layers, 13=wrecking_ball, 14=cloth_cylinder_drop, 15=200_sheet_cylinder_drop, 16=chain_net_ball, 17=rigid_objects_in_box, 18=bike_chain, 19=anchor, 20=arch, 21=hyperboloid_gears");
         add_double("sheet_y",      sheet_y,       0.20,           "Midline y (m) for example 1");
         add_double("twist_rate",   twist_rate,    0.5,            "Relative twist rate in Hz for example 1 (turns/second; total turns = rate * duration)");
         add_int   ("twist_nx",     twist_nx,      99,             "Grid subdivisions along x for example 1 (vertices = (twist_nx+1)*(twist_ny+1))");
@@ -342,6 +347,9 @@ struct IPCArgs3D : ArgParser {
         add_double("anchor_drive_speed", anchor_drive_speed, -100.0, "Example 19: spool motor speed about world x in degrees/second; zero fixes the spool");
         add_double("anchor_motor_radius", anchor_motor_radius, 2.0, "Example 19: positive radial lever arm of the spool's virtual motor points in metres");
         add_double("anchor_shaft_span", anchor_shaft_span, 3.0, "Example 19: positive axial distance of the motor points from the spool center in metres");
+        add_double("hyperboloid_drive_speed", hyperboloid_drive_speed, 30.0, "Example 21: handle target speed about the gear shaft in degrees/second; zero fixes the crank");
+        add_double("hyperboloid_motor_radius", hyperboloid_motor_radius, 0.048, "Example 21: radial offset of the single handle drive point in metres; 0.048 places it inside the authored grip");
+        add_double("hyperboloid_shaft_span", hyperboloid_shaft_span, 0.06, "Example 21: positive axial distance from each hinge to its stationary support points in metres");
 
         add_string("outdir",       outdir,        "frames_sim3d", "Output directory");
         add_string("format",       format,        "geo",          "Output format: obj, geo, ply, or usd");
@@ -351,8 +359,8 @@ struct IPCArgs3D : ArgParser {
 
     bool parse(int argc, char** argv) {
         if (!ArgParser::parse(argc, argv)) return false;
-        if (example < 1 || example > 20) {
-            std::cerr << "Error: --example must be between 1 and 20\n";
+        if (example < 1 || example > 21) {
+            std::cerr << "Error: --example must be between 1 and 21\n";
             return false;
         }
         const auto supplied = [&](const char* flag) {
@@ -544,6 +552,27 @@ struct IPCArgs3D : ArgParser {
             preset("--theta_box_max", theta_box_max, 0.05);
             preset("--node_box_update_count", node_box_update_count, 5);
             preset("--exact_computation_fallback", exact_computation_fallback, false);
+        }
+        if (example == 21) {
+            const auto preset = [&](const char* flag, auto& field, auto value) {
+                if (!supplied(flag)) field = value;
+            };
+            // Metre-scale assembly with submillimetre tooth/bearing clearances.
+            // Only the crank is motorized; explicit CLI values take precedence.
+            preset("--num_frames", num_frames, 360);
+            preset("--substeps", substeps, 20);
+            preset("--max_substep_iters", max_substep_iters, 20);
+            preset("--fixed_iters", fixed_iters, true);
+            preset("--use_simd", use_simd, true);
+            preset("--d_hat", d_hat, 0.0001);
+            preset("--k_barrier", k_barrier, 1.0e5);
+            preset("--kpin", kpin, 1.0e5);
+            preset("--k_sdf", k_sdf, 0.0);
+            preset("--friction_coefficient", friction_coefficient, 0.0);
+            preset("--node_box_min", node_box_min, 1.0e-6);
+            preset("--node_box_max", node_box_max, 0.001);
+            preset("--theta_box_min", theta_box_min, 0.0001);
+            preset("--theta_box_max", theta_box_max, 0.01);
         }
         return true;
     }

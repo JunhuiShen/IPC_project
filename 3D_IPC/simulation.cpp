@@ -64,8 +64,9 @@ int main(int argc, char** argv) {
     else if (args.example == 18) build_bike_chain_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 19) build_anchor_example(args, ref_mesh, state, X, pins, params);
     else if (args.example == 20) build_arch_example(args, ref_mesh, state, X, pins, params, static_x, static_tris);
+    else if (args.example == 21) build_hyperboloid_gears_example(args, ref_mesh, state, X, pins, params);
     else {
-        std::cerr << "Unknown --example " << args.example << ". Valid values: 1 through 20.\n";
+        std::cerr << "Unknown --example " << args.example << ". Valid values: 1 through 21.\n";
         return 1;
     }
 
@@ -162,8 +163,10 @@ int main(int argc, char** argv) {
         ref_mesh.build_lumped_mass(params.density, params.thickness);
     VertexTriangleMap adj = build_incident_triangle_map(ref_mesh.tris);
 
-    // Validate d_hat against the minimum edge length in the mesh.
-    if (params.d_hat > 0.0) {
+    // Retain the shortest-edge guard for deformable self-contact. Pure rigid
+    // scenes exclude all same-body pairs, so tiny tessellation edges (such as
+    // the boolean seams in Example 21's stand) do not limit inter-body d_hat.
+    if (has_deformable && params.d_hat > 0.0) {
         double min_edge_len = std::numeric_limits<double>::max();
         const int nt = static_cast<int>(ref_mesh.tris.size()) / 3;
         for (int t = 0; t < nt; ++t) {

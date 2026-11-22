@@ -97,6 +97,7 @@ struct Scene {
         case 18:build_bike_chain_example(args,mesh,state,X,pins,p);break;
         case 19:build_anchor_example(args,mesh,state,X,pins,p);break;
         case 20:build_arch_example(args,mesh,state,X,pins,p,visual,visual_tris);break;
+        case 21:build_hyperboloid_gears_example(args,mesh,state,X,pins,p);break;
         default:throw std::invalid_argument("Unknown example ID");}
         auto n=state.deformed_positions.size();has_rigid=!mesh.total_mass.empty();
         if(mesh.node_to_rb.empty()&&!has_rigid)mesh.node_to_rb.assign(n,-1);

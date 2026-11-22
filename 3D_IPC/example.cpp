@@ -6,6 +6,7 @@
 #include <Eigen/Eigenvalues>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -275,7 +276,8 @@ void use_closed_volume_rigid_mass_properties(
 // Accept either the example_obj root or the scene folder as --datadir.
 std::filesystem::path paper_scene_asset_directory(
     const std::string& data_directory, const char* scene,
-    const std::vector<std::filesystem::path>& required) {
+    const std::vector<std::filesystem::path>& required,
+    const std::vector<std::string>& aliases = {}) {
     namespace fs = std::filesystem;
     std::vector<fs::path> candidates;
     if (!data_directory.empty()) {
@@ -284,6 +286,11 @@ std::filesystem::path paper_scene_asset_directory(
     }
     candidates.push_back(fs::path("example_obj") / scene);
     candidates.push_back(fs::path(__FILE__).parent_path() / "example_obj" / scene);
+    for (const std::string& alias : aliases) {
+        if (!data_directory.empty()) candidates.push_back(fs::path(data_directory) / alias);
+        candidates.push_back(fs::path("example_obj") / alias);
+        candidates.push_back(fs::path(__FILE__).parent_path() / "example_obj" / alias);
+    }
     for (const fs::path& candidate : candidates) {
         const bool complete = std::all_of(required.begin(), required.end(),
             [&](const fs::path& file) {
@@ -303,7 +310,8 @@ std::filesystem::path paper_scene_asset_directory(
 void append_authored_obj_rigid_body(
     const std::filesystem::path& filename, const Vec3& translation,
     const Vec4& orientation, const double density,
-    const RigidBodyUpdateMode mode, RefMesh& ref_mesh, DeformedState& state) {
+    const RigidBodyUpdateMode mode, RefMesh& ref_mesh, DeformedState& state,
+    const double scale = 1.0) {
     std::vector<Vec3> positions;
     std::vector<int> triangles;
     load_obj_mesh(filename.string(), positions, triangles);
@@ -315,10 +323,10 @@ void append_authored_obj_rigid_body(
         upper = upper.cwiseMax(p);
     }
     const Vec3 center = translation + quaternion_rotate(
-        orientation, 0.5 * (lower + upper));
+        orientation, 0.5 * scale * (lower + upper));
     const std::size_t first_triangle = ref_mesh.tris.size() / 3;
     const int body = append_normalized_obj_rigid_body(
-        filename.string(), state, ref_mesh, center, (upper - lower).maxCoeff(),
+        filename.string(), state, ref_mesh, center, scale * (upper - lower).maxCoeff(),
         density, Vec3::Zero(), orientation, Vec3::Zero(), mode);
     use_closed_volume_rigid_mass_properties(
         body, first_triangle, ref_mesh.tris.size() / 3, ref_mesh, state);
@@ -3168,6 +3176,78 @@ void build_arch_example(
             directory / filename, Vec3::Zero(), Vec4(1.0, 0.0, 0.0, 0.0),
             args.rigid_density, RigidBodyUpdateMode::TranslationAndOrientation,
             ref_mesh, state);
+    }
+    ref_mesh.build_deformable_nodes();
+}
+
+// Example 21: the authored hyperboloid assembly, driven at the handle grip.
+// The second gear receives torque through tooth contact. Two stationary shaft
+// points form each soft hinge, leaving rotation about its own axis free.
+void build_hyperboloid_gears_example(
+    const IPCArgs3D& args, RefMesh& ref_mesh, DeformedState& state,
+    std::vector<Vec2>& X, std::vector<Pin>& pins, SimParams& params) {
+    if (!std::isfinite(args.hyperboloid_drive_speed)
+        || !std::isfinite(args.hyperboloid_motor_radius) || args.hyperboloid_motor_radius <= 0.0
+        || !std::isfinite(args.hyperboloid_shaft_span) || args.hyperboloid_shaft_span <= 0.0
+        || !std::isfinite(params.kpin) || params.kpin <= 0.0) {
+        throw std::invalid_argument(
+            "Example 21 requires a finite motor speed and positive motor radius, shaft span, and kpin");
+    }
+    const auto directory = paper_scene_asset_directory(
+        args.datadir, "hyperboloid_gears",
+        {"out/gear1_crank.obj", "out/gear2.obj", "out/stand.obj"},
+        {"hyperboloid_gears "}) / "out";
+    clear_model(ref_mesh, state, X, pins);
+    params.sdf_planes.clear();
+    params.sdf_cylinders.clear();
+    params.sdf_spheres.clear();
+    params.rigid_pins.clear();
+    params.rigid_pin_time = 0.0;
+
+    // scene.json gives millimetres in a Z-up frame. Rotate the complete
+    // assembly to Y-up and convert to metres without normalizing each part.
+    const Vec4 orientation(std::cos(0.25 * kPi), -std::sin(0.25 * kPi), 0.0, 0.0);
+    constexpr double scale = 0.001;
+    const bool driven = args.hyperboloid_drive_speed != 0.0;
+    append_authored_obj_rigid_body(
+        directory / "gear1_crank.obj", Vec3::Zero(), orientation, args.rigid_density,
+        driven ? RigidBodyUpdateMode::TranslationAndOrientation : RigidBodyUpdateMode::None,
+        ref_mesh, state, scale);
+    append_authored_obj_rigid_body(
+        directory / "gear2.obj", Vec3::Zero(), orientation, args.rigid_density,
+        RigidBodyUpdateMode::TranslationAndOrientation, ref_mesh, state, scale);
+    append_authored_obj_rigid_body(
+        directory / "stand.obj", Vec3::Zero(), orientation, args.rigid_density,
+        RigidBodyUpdateMode::None, ref_mesh, state, scale);
+
+    // Hinges from the bundled out/scene.json after the same frame conversion.
+    const Vec3 centers[2] = {Vec3::Zero(), Vec3(0.0, 0.0, -0.05)};
+    const Vec3 axes[2] = {Vec3(std::sqrt(3.0) / 2.0, 0.5, 0.0),
+                          Vec3(std::sqrt(3.0) / 2.0, -0.5, 0.0)};
+    const auto add_pin = [&](const int body, const Vec3& target, const double speed) {
+        const Vec3 local = quaternion_inverse_rotate(
+            state.orientations[body], target - state.x_coms[body]);
+        RigidPin pin{body, local, target, centers[body], speed};
+        pin.rotation_axis = axes[body];
+        params.rigid_pins.push_back(pin);
+    };
+
+    if (driven) {
+        const double omega = args.hyperboloid_drive_speed * kPi / 180.0;
+        // One spring pulls a material point inside the handle grip. The
+        // authored grip midpoint is (48, 0, 135) mm in the generator's sim
+        // frame: 135 = face_width + shaft_extra + crank_w/2 + handle_len/2.
+        // After both frame conversions, +sim-X is -world-Z and +sim-Z is
+        // axes[0]. The fused crank/shaft transmits the handle force to gear 1.
+        const Vec3 grip = centers[0] + 0.135 * axes[0]
+            - args.hyperboloid_motor_radius * Vec3::UnitZ();
+        add_pin(0, grip, omega);
+        // Start at rest. All subsequent body motion comes from the solver;
+        // only this handle target is animated, never the body's pose/velocity.
+    }
+    for (int body = driven ? 0 : 1; body < 2; ++body) {
+        for (const double offset : {-args.hyperboloid_shaft_span, args.hyperboloid_shaft_span})
+            add_pin(body, centers[body] + offset * axes[body], 0.0);
     }
     ref_mesh.build_deformable_nodes();
 }

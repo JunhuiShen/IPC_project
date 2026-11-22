@@ -1,0 +1,118 @@
+{
+  "units": "mm",
+  "parameters": {
+    "teeth": 24,
+    "pitch_radius": 25.0,
+    "skew_angle": 30.0,
+    "throat_offset": -50.0,
+    "face_width": 50.0,
+    "addendum": 2.2,
+    "dedendum": 2.8,
+    "fin_thickness_normal": 2.0,
+    "flank_angle": 14.0,
+    "tip_fillet": 0.5,
+    "hub_slices": 60,
+    "tip_segments": 8,
+    "shaft_radius": 5.0,
+    "shaft_extra": 58.0,
+    "bearing_inset": 20.0,
+    "shaft_free": 10.0,
+    "crank_len": 48.0,
+    "crank_w": 9.0,
+    "handle_len": 45.0,
+    "handle_r": 6.0,
+    "post_w": 26.0,
+    "post_t": 16.0,
+    "base": [
+      250.0,
+      130.0,
+      12.0
+    ],
+    "check_phases": 2
+  },
+  "derived": {
+    "tip_radius": 27.2,
+    "hub_radius": 22.2,
+    "normal_pitch": 5.668123013231932,
+    "shaft_angle_deg": 60.0,
+    "centre_distance": 50.0,
+    "gear_ratio": 1.0,
+    "worst_case_interference_mm": 0.0,
+    "common_ruling": {
+      "point": [
+        25.0,
+        0,
+        0
+      ],
+      "direction": [
+        0.0,
+        0.49999999999999994,
+        0.8660254037844387
+      ]
+    }
+  },
+  "frame": "world: Z up (gravity -Z), X left-right, Y depth. base top at Z=base_top.",
+  "base_top": -88.91746030536272,
+  "world_from_sim": [
+    [
+      0.0,
+      0.49999999999999994,
+      0.8660254037844387,
+      0.0
+    ],
+    [
+      1.0,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.0,
+      -0.8660254037844387,
+      0.49999999999999994,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "bodies": {
+    "gear1_crank": {
+      "file": "gear1_crank.obj",
+      "hinge_point": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "hinge_axis": [
+        0.8660254037844387,
+        0.0,
+        0.49999999999999994
+      ],
+      "mass_kg_if_PLA": 0.34667247970647674,
+      "note": "drive by applying torque about the hinge, or push the grip"
+    },
+    "gear2": {
+      "file": "gear2.obj",
+      "hinge_point": [
+        -1.2632372804092257e-31,
+        50.0,
+        3.061616997868383e-15
+      ],
+      "hinge_axis": [
+        0.8660254037844388,
+        6.123233995736765e-17,
+        -0.49999999999999994
+      ],
+      "mass_kg_if_PLA": 0.3367867211058618
+    },
+    "stand": {
+      "file": "stand.obj",
+      "static": true
+    }
+  },
+  "kinematics": "theta2 = -theta1 about each body's own hinge axis (1:1). Teeth interleave along the common ruling."
+}
