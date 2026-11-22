@@ -30,6 +30,7 @@ class ContactPolicyTests(unittest.TestCase):
                                                   iterations=2, friction=.2)
                     params = payload["params"]
                     params.update(exact_computation_fallback=exact, ccd_method="direct_rounding",
+                                  gs_ccd_accept_uncertified=True, gs_ccd_guess_accept_uncertified=True,
                                   use_ccd_guess=False, use_colored_ccd_guess=False,
                                   use_colored_ccd_guess_level_based=True,
                                   colored_ccd_guess_iters=1, colored_ccd_guess_fraction=1.)
@@ -39,6 +40,8 @@ class ContactPolicyTests(unittest.TestCase):
                     self.assertEqual(solver.configuration["energy_contact"]["scalar_precision"], "float64")
                     self.assertEqual(solver.ccd_backend.method, "direct_rounding")
                     self.assertEqual(solver.ccd_backend.exact_geometry, exact)
+                    self.assertFalse(solver.configuration["gs_ccd_accept_uncertified"])
+                    self.assertFalse(solver.configuration["gs_ccd_guess_accept_uncertified"])
                     before, after = model.state(), model.state()
                     _, verify, _ = get_plane_kernels("direct_rounding")
                     with patch.object(wp, "launch", wraps=wp.launch) as launch:

@@ -494,6 +494,18 @@ def _evaluate_fast(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
                     scatter_self(result, nodes, colors, flags, mass, color, forces, hessians)
 
 
+@wp.func_native(r"""
+#if defined(__CUDA_ARCH__)
+    // Spread eight consecutive candidates per block before assigning the
+    // next stripe. This keeps more SMs busy for short device-resident spans.
+    if (workers % 64 == 0)
+        return (tid / 64) * 8 + (tid % 8) + ((tid % 64) / 8) * (workers / 8);
+#endif
+    return tid;
+""")
+def _contact_worker(tid: int, workers: int) -> int: ...
+
+
 @wp.kernel
 def _evaluate_grouped(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
                       triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
@@ -502,7 +514,7 @@ def _evaluate_grouped(positions: wp.array[wp.vec3], previous: wp.array[wp.vec3],
                       view_epoch: wp.array[wp.uint64], query_epoch: wp.array[wp.uint64],
                       params: Parameters, workers: int, pending: wp.array[int], pending_count: wp.array[int],
                       forces: wp.array[wp.vec3], hessians: wp.array[wp.mat33], error: wp.array[int]):
-    worker = wp.tid()
+    worker = _contact_worker(wp.tid(), workers)
     color = current_color[0]
     valid = color >= 0 and color < colors.shape[0]
     begin = int(0)
@@ -815,6 +827,7 @@ class ContactBackend:
                      104: "nonfinite contact derivatives", 105: "exact contact capacity exhausted",
                      201: "CCD initial intersection", 202: "invalid represented CCD motion",
                      203: "exact CCD capacity exhausted", 204: "CCD rounded-endpoint reproof exhausted",
+                     806: "prescribed boundary motion could not be certified",
                      302: "nonfinite initial-guess target", 350: "invalid initial-guess geometry",
                      351: "invalid initial-guess interval", 353: "initial-guess dyadic capacity exhausted",
                      354: "initial-guess heap capacity exhausted", 371: "invalid predictor graph",

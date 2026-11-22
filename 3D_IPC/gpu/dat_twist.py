@@ -199,6 +199,12 @@ def make_example_type(original_example, angular_velocity=ANGULAR_VELOCITY, *, en
         raise TypeError("enable_collision_pipeline must be a bool")
 
     class DatClothTwist(original_example):
+        def simulate(self):
+            if getattr(self.solver, "prescribed_boundary", None) is not None:
+                from .twist_boundary import simulate_gs_twist
+                return simulate_gs_twist(self)
+            return super().simulate()
+
         def capture(self):
             actual = (self.model.particle_count, self.model.tri_count,
                       self.fps, self.sim_substeps, self.iterations)
@@ -208,6 +214,10 @@ def make_example_type(original_example, angular_velocity=ANGULAR_VELOCITY, *, en
             # The original scene assigns opposite rotation axes to its edges.
             # Set their common speed before simulate() captures kernel inputs.
             self.rot_angular_velocity = float(angular_velocity)
+            solver = getattr(self, "solver", None)
+            if hasattr(solver, "prescribed_boundary") and solver.enable_collisions:
+                from .twist_boundary import TwistBoundary
+                solver.prescribed_boundary = TwistBoundary(self)
             if not enable_collision_pipeline:
                 if self.model.shape_count != 0:
                     raise RuntimeError("The shared cloth benchmark must have no collision shapes")
@@ -289,8 +299,8 @@ def run_own(arguments, *, enable_planar_dat=True, enable_broad_phase_boxes=False
         newton.solvers.SolverVBD = original_solver
 
 
-def run_gs(arguments, *, enable_collisions=True, ccd_method=None, accept_uncertified=False,
-           guess_accept_uncertified=False):
+def run_gs(arguments, *, enable_collisions=True, ccd_method=None, level_based_ccd_guess=False,
+           colored_ccd_guess_iters=1, colored_ccd_guess_fraction=1.0):
     """Run the unchanged stock scene with our GS update and energy kernels."""
     from .solver import SolverIPC
     import newton.solvers
@@ -299,13 +309,11 @@ def run_gs(arguments, *, enable_collisions=True, ccd_method=None, accept_uncerti
     solvers = []
 
     def gs_solver(model, **stock_options):
-        attach_stock_ipc(model, gs_predictor="level" if guess_accept_uncertified else "colored")
+        attach_stock_ipc(model, gs_predictor="level" if level_based_ccd_guess else "colored",
+                         colored_ccd_guess_iters=colored_ccd_guess_iters,
+                         colored_ccd_guess_fraction=colored_ccd_guess_fraction)
         if ccd_method is not None:
             model.ipc.params["ccd_method"] = ccd_method
-        if accept_uncertified:
-            model.ipc.params["gs_ccd_accept_uncertified"] = True
-        if guess_accept_uncertified:
-            model.ipc.params["gs_ccd_guess_accept_uncertified"] = True
         solver = SolverIPC(model, iterations=stock_options.get("iterations", ITERATIONS),
             enable_collisions=enable_collisions,
             vertex_contact_capacity=stock_options.get("particle_vertex_contact_buffer_size", 512),

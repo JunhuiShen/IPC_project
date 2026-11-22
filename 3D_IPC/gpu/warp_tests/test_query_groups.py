@@ -75,6 +75,68 @@ class GroupQueryTests(unittest.TestCase):
         wp.init()
         cls.devices = [wp.get_device("cpu"), *wp.get_cuda_devices()]
 
+    def test_full_endpoint_vote_cannot_authorize_another_pairs_rounded_prefix(self):
+        x, y = np.float32(150000), np.float32(100000)
+        u = np.spacing(y)
+        start = np.float32([[x+2*u, y, .09], [x-1, y+1+u, -1], [x+1, y-1+u, -1],
+                            [x, y+u, 1], [x-1, y-1, 0], [x+1, y-1, 0], [x, y+1, 0]])
+        proposal = start.copy()
+        proposal[0] = [x, y+2*u, -.06]
+        for device in self.devices:
+            for faces in ([0], [0, 1], [1, 0]):
+                q, model, contacts = fixture(device)
+                q.assign(start)
+                model.ipc = SimpleNamespace(params={"ccd_method": "direct_rounding"})
+                groups = wp.array(np.arange(7), int, device=device)
+                info = contacts.info
+                slots = info.vertex_colliding_triangles.numpy()
+                for i, face in enumerate(faces):
+                    slots[2*i:2*i+2] = [0, face]
+                info.vertex_colliding_triangles.assign(slots)
+                info.vertex_colliding_triangles_count.assign([len(faces), 0, 0, 0, 0, 0, 0])
+                contacts.refresh()
+                bank = QueryGroups(contacts)
+                bank.build(groups)
+                current = wp.zeros(1, int, device=device)
+                backend = CcdBackend(contacts, node_box_radius=2, exact_geometry=False)
+                backend.accept(q, wp.array(proposal, wp.vec3, device=device), -1, .01,
+                               colors=groups, current_color=current, query_view=bank.view(current),
+                               independent=True, bounded=False)
+                backend.check()
+                # The oblique plane certifies the exact endpoint. The z=0 face
+                # clips it, so both constraints must instead certify a prefix.
+                np.testing.assert_array_equal(q.numpy(), proposal if len(faces) == 1 else start)
+
+    def test_level_guess_greedily_colors_the_retained_swept_pairs(self):
+        from gpu.movement_box_queries import GsBoxEpochFilter
+
+        params = {"use_colored_ccd_guess_level_based": True, "colored_ccd_guess_iters": 1,
+                  "colored_ccd_guess_fraction": 1.0, "d_hat": .002, "k_barrier": 100., "dt": .01}
+        for device in self.devices:
+            q, model, contacts, detector, velocity = independent_predictor_fixture(device)
+            model.ipc = SimpleNamespace(params={"ccd_method": "direct_rounding"})
+            start = q.numpy().copy()
+            # Both moving points sweep through the triangle's AABB. Only
+            # vertex 0 passes through the triangle; vertex 4 clears its edge.
+            start[4] = [.9, .9, .1]
+            q.assign(start)
+            v = velocity.numpy()
+            v[4] = v[0]
+            velocity.assign(v)
+            backend = CcdBackend(contacts, exact_geometry=False)
+            guess = InitialGuess(backend, detector, params, use_group_queries=True, independent_colors=True)
+            guess.box_filter = GsBoxEpochFilter(contacts)
+            guess.apply(q, wp.clone(q), velocity, wp.empty_like(q), .01, params)
+            backend.check()
+            self.assertEqual(int(guess.box_filter.raw_count.numpy()[0]), 2)
+            self.assertEqual(int(contacts.candidate_count.numpy()[0]), 1)
+            # The remaining vertex-face pair forms a clique. Vertex 4 is
+            # independent and receives the first available greedy color.
+            np.testing.assert_array_equal(guess.graph.colors.numpy(), [0, 1, 2, 3, 0])
+            self.assertGreater(float(q.numpy()[0, 2]), 0)
+            self.assertLess(float(q.numpy()[0, 2]), start[0, 2])
+            np.testing.assert_array_equal(q.numpy()[4], guess.targets.numpy()[4])
+
     def test_spans_include_each_candidate_once_per_unique_nonnegative_group(self):
         for device in self.devices:
             q, model, contacts = fixture(device)
@@ -506,7 +568,7 @@ class GroupQueryTests(unittest.TestCase):
                     np.testing.assert_array_equal(end[1:4], initial[1:4])
                 np.testing.assert_array_equal(q.numpy(), ends[1])
 
-    def test_level_uncertified_fallback_uses_the_target_in_both_sweeps_if_stalled(self):
+    def test_level_predictor_keeps_ccd_step_in_probe_and_update_even_for_legacy_settings(self):
         base_params = {"use_colored_ccd_guess_level_based": True, "colored_ccd_guess_iters": 1}
         for device in self.devices:
             for method in ("plane", "direct_rounding"):
@@ -541,15 +603,13 @@ class GroupQueryTests(unittest.TestCase):
                                 np.testing.assert_array_equal(endpoint[1:4], initial[1:4])
                                 np.testing.assert_array_equal(endpoint[4], target[4])
                                 if height < 1e-7:
-                                    expected = target[0] if allow_uncertified else initial[0]
-                                    np.testing.assert_array_equal(endpoint[0], expected)
+                                    np.testing.assert_array_equal(endpoint[0], initial[0])
                                 else:
                                     self.assertGreater(endpoint[0, 2], 1e-7)
                                     self.assertLess(endpoint[0, 2], height)
                             np.testing.assert_array_equal(q.numpy(), endpoints[-1])
                             ends_by_option.append(endpoints)
-                        if height >= 1e-7:
-                            np.testing.assert_array_equal(*ends_by_option)
+                        np.testing.assert_array_equal(*ends_by_option)
 
     def test_independent_predictor_capture_replay_matches_eager_and_full_free_target(self):
         devices = wp.get_cuda_devices()

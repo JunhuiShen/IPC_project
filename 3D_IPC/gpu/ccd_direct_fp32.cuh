@@ -10,12 +10,9 @@
 #define IPC_DIRECT32_HD
 #endif
 
-// Experimental CPU-style direct proposal, implemented entirely in FP32.
-// A single approximate closest-feature direction is only a proposal. Every
-// primitive corner must pass an outward-rounded projection certificate.
-// Unlike the CPU exact bound's min(start_gap, floor) policy, this path requires
-// the complete floor on its starting axis. Unresolved/sub-floor starts may
-// make no progress. There is no exact fallback, axis search or time bisection.
+// Direct FP32 clipping requires an outward-rounded separation proof for the
+// represented motion. Grouped updates first try a coordinate-axis clearance
+// bound, then the closest-feature axis. An unresolved start can give zero.
 namespace ipc_gpu { namespace ccd32direct {
 using ccd32::LinearQuery;
 using ccd32::ClipResult;
@@ -238,6 +235,41 @@ IPC_DIRECT32_HD inline bool rounding_envelope(const LinearQuery& q, int mover,
     return finite(e0) && finite(e1);
 }
 
+// A represented prefix is monotone in each coordinate up to beta<1;
+// beta=1 uses the original endpoint. Use the largest interior beta to
+// enclose the whole family, including FP32 interpolation rounding.
+IPC_DIRECT32_HD inline bool coordinate_clearance(const LinearQuery& q, int mover, float retained) {
+    const int split = q.vertex_face ? 1 : 2;
+    float extent[3];
+    for (int k = 0; k < 3; ++k) {
+        const float start = q.start[mover][k], end = q.end[mover][k];
+        const float interior = interpolate(start, end, 0x1.fffffep-1f);
+        if (!finite(interior))
+            return false;
+        const float lo = minimum(start, minimum(end, interior));
+        const float hi = maximum(start, maximum(end, interior));
+        extent[k] = subtract_bound(hi, lo, true);
+    }
+    for (int k = 0; k < 3; ++k) {
+        float alo = infinity(), ahi = -infinity(), blo = infinity(), bhi = -infinity();
+        for (int i = 0; i < 4; ++i) {
+            if (i < split) {
+                alo = minimum(alo, q.start[i][k]);
+                ahi = maximum(ahi, q.start[i][k]);
+            } else {
+                blo = minimum(blo, q.start[i][k]);
+                bhi = maximum(bhi, q.start[i][k]);
+            }
+        }
+        const float gap = maximum(subtract_bound(alo, bhi, false), subtract_bound(blo, ahi, false));
+        const float budget =
+            multiply_bound(1.0f - retained, subtract_bound(gap, q.gap_floor, false), false);
+        if (finite(budget) && extent[k] < budget)
+            return true;
+    }
+    return false;
+}
+
 } // namespace detail
 
 IPC_DIRECT32_HD inline Status validate_linear(const LinearQuery& q) {
@@ -251,34 +283,56 @@ IPC_DIRECT32_HD inline Status validate_linear(const LinearQuery& q) {
         && detail::certify_axis(q, axis, threshold) ? Status::Safe : Status::Uncertain;
 }
 
-IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q) {
+// Grouped GS also certifies the complete stored move. Reserving clearance
+// when moving towards a contact keeps subsequent updates off the rounding floor.
+IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q, bool* full_step = nullptr) {
     using namespace detail;
+    if (full_step) *full_step = false;
     if (!valid(q)) return -1.0f;
     const int mover = moving_vertex(q);
     if (mover == -2) return -1.0f;
-    if (mover == -1) return 1.0f;
+    if (mover == -1) {
+        if (full_step) *full_step = true;
+        return 1.0f;
+    }
+    constexpr float retained_clearance = 0.8f;
+    if (full_step && detail::coordinate_clearance(q,mover,retained_clearance)) {
+        *full_step = true;
+        return 1.0f;
+    }
     Vec axis;
     float threshold;
     if (!prepare_axis(q, axis, threshold)) return 0.0f;
 
     const int split = q.vertex_face ? 1 : 2;
     float moving_gap = infinity();
+    bool end_safe = true;
     for (int a = 0; a < split; ++a) for (int b = split; b < 4; ++b) {
         const Interval gap = projected_gap(q.start[a], q.start[b], axis);
         if (!bounded(gap) || !(gap.lo > threshold)) return 0.0f;
-        if (a == mover || b == mover) moving_gap = minimum(moving_gap, gap.lo);
+        if (a == mover || b == mover) {
+            moving_gap = minimum(moving_gap, gap.lo);
+            if (full_step && end_safe) {
+                const Interval end = projected_gap(q.end[a], q.end[b], axis);
+                const float reserve = threshold + retained_clearance * (gap.lo - threshold);
+                end_safe = bounded(end) && end.lo > threshold && end.lo >= reserve;
+            }
+        }
     }
+    if (full_step) *full_step = end_safe;
     Interval slope;
     float e0, e1;
     if (!rounding_envelope(q, mover, axis, slope, e0, e1)) return 0.0f;
     if (mover >= split) slope = {-slope.hi, -slope.lo};
     const float closing = maximum(0.0f, -slope.lo);
-    const float numerator = subtract_bound(subtract_bound(moving_gap, threshold, false), e0, false);
+    float budget = subtract_bound(moving_gap, threshold, false);
+    if (full_step && closing > 0.0f) budget = multiply_bound(1.0f-retained_clearance, budget, false);
+    const float numerator = subtract_bound(budget, e0, false);
     const float denominator = add_bound(closing, e1, true);
     if (!finite(numerator) || !finite(denominator) || !(numerator > 0.0f)) return 0.0f;
     // The batch takes a minimum across pairs. A full proposal must cover all
     // smaller, rounded prefixes as well as the original endpoint at beta=1.
-    if (numerator > denominator && certify_axis(q, axis, threshold)) return 1.0f;
+    if (numerator > denominator && (full_step ? end_safe : certify_axis(q, axis, threshold))) return 1.0f;
     float fraction = denominator > 0.0f ? divide_down(numerator, denominator) : 1.0f;
     fraction = minimum(1.0f, maximum(0.0f, fraction));
     // Strictly interior, including when downward division happened to be

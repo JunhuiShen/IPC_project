@@ -142,10 +142,13 @@ class PlanarCliTests(unittest.TestCase):
             self.assertNotIn("--colored-ccd-guess-iters",own.call_args.args[0])
 
     def test_level_guess_rejects_wrong_modes_and_unselected_controls_before_runtime(self):
-        for mode in ("ipc","dat-reference"):
-            with patch.object(run,"_runtime") as runtime,redirect_stderr(io.StringIO()):
-                self.assertEqual(run.main(["--solver",mode,"--level-based-ccd-guess"]),1)
-                runtime.assert_not_called()
+        with patch.object(run,"_runtime") as runtime,redirect_stderr(io.StringIO()):
+            self.assertEqual(run.main(["--solver","dat-reference","--level-based-ccd-guess"]),1)
+            runtime.assert_not_called()
+        with patch.object(run, "_runtime", side_effect=self.runtime), \
+             patch.object(dat_twist, "run_gs", return_value=0) as gs, redirect_stdout(io.StringIO()):
+            self.assertEqual(run.main(["--solver", "ipc", "--stock-cloth-twist", "--level-based-ccd-guess"]), 0)
+            self.assertTrue(gs.call_args.kwargs["level_based_ccd_guess"])
         for flag,value in (("--colored-ccd-guess-iters","2"),("--colored-ccd-guess-fraction",".9")):
             with patch.object(run,"_runtime") as runtime,redirect_stderr(io.StringIO()):
                 self.assertEqual(run.main(["--solver","dat",flag,value]),1)

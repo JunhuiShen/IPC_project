@@ -209,42 +209,26 @@ def _commit(candidate: wp.array[wp.vec3], q: wp.array[wp.vec3], verified: wp.arr
 
 
 @wp.kernel(module="unique", enable_backward=False)
-def _restore_stalled_proposals(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3],
-                              unclipped: wp.array[wp.vec3], rejected: wp.array[int],
-                              has_rejections: bool, error: wp.array[int]):
-    i = wp.tid()
-    if error[0] == 0:
-        start = q[i]
-        point = candidate[i]
-        stalled = point[0] == start[0] and point[1] == start[1] and point[2] == start[2]
-        if stalled or (has_rejections and rejected[i] != 0):
-            # Preparation has validated the proposal and applied any movement bounds.
-            candidate[i] = unclipped[i]
-            if has_rejections:
-                rejected[i] = 0
-
-
-@wp.kernel(module="unique", enable_backward=False)
-def _commit_direct(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], fractions: wp.array[float],
-                   unclipped: wp.array[wp.vec3], rejected: wp.array[int], attempts: wp.array[int],
-                   verified: wp.array[int], error: wp.array[int]):
+def _apply_direct_fraction(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], fractions: wp.array[float],
+                   rejected: wp.array[int], attempts: wp.array[int],
+                   verified: wp.array[int], publish: bool, error: wp.array[int]):
     i = wp.tid()
     if i == 0:
         attempts[0] = 1
         verified[0] = 1
     if i < q.shape[0]:
-        rejected[i] = 0
+        full_step = rejected[i] == 0
+        rejected[i] = 0  # reused for the optional shortened-endpoint check
         proposal = candidate[i]
-        if unclipped.shape[0] != 0:
-            unclipped[i] = proposal
         if error[0] == 0:
             point = proposal
-            if fractions[i] < 1.0:
+            if full_step:
+                fractions[i] = 1.0
+            elif fractions[i] < 1.0:
                 point = interpolate_positions(q[i], proposal, fractions[i])
-                if unclipped.shape[0] != 0 and point == q[i]:
-                    point = proposal
             candidate[i] = point
-            q[i] = point
+            if publish:
+                q[i] = point
 
 
 class CcdBackend:
@@ -294,10 +278,10 @@ class CcdBackend:
             raise TypeError("CCD requires matching upstream float32 particle arrays")
         if unclipped is not None:
             if not (independent and clip_ccd):
-                raise ValueError("Uncertified CCD fallback requires independent CCD updates")
+                raise ValueError("Saving pre-CCD proposals requires independent CCD updates")
             if (unclipped.dtype != wp.vec3 or unclipped.shape != q.shape or unclipped.device != self.device
                     or unclipped.ptr in (q.ptr, proposed.ptr, self.candidate.ptr)):
-                raise ValueError("Uncertified CCD fallback requires separate float32 proposal storage")
+                raise ValueError("Pre-CCD proposals require separate float32 storage")
         radius = self.radius if radius is None else radius
         if not math.isfinite(radius) or radius <= 1.0e-10:
             raise ValueError("Invalid CCD movement radius")
@@ -344,36 +328,34 @@ class CcdBackend:
             wp.launch(_commit, q.shape[0], [self.candidate, q, self.verified, self.error], device=self.device)
             return q
         direct_commit = self.method == "direct_rounding" and not self.exact_geometry
-        if unclipped is not None and not direct_commit:
+        # Optional output for callers inspecting the proposal before CCD.
+        if unclipped is not None:
             wp.copy(unclipped, self.candidate)
         if self.method != "interval":
             propose, verify, publish = get_plane_kernels(self.method)
             args = [q, self.candidate, ids, self.model.tri_indices, self.model.edge_indices,
                     c.info, offsets, current_group, c.fast_workers, self.node_fractions]
-            if c.capacity:
-                wp.launch(propose, c.fast_workers, args + [self.error], device=self.device,
-                          block_dim=self.group_query_block_dim)
-            if direct_commit:
-                # All incident pairs have published their bounds. No other
-                # vertex reads this endpoint until the next color.
-                wp.launch(_commit_direct, max(1, q.shape[0]),
-                          [q, self.candidate, self.node_fractions, unclipped, self.plane_rejected,
-                           self.attempts, self.verified, self.error], device=self.device)
-                return q
             self.plane_rejected.zero_()
-            wp.launch(get_independent_shortener(), q.shape[0],
-                      [q, self.candidate, self.node_fractions, self.error], device=self.device)
+            if c.capacity:
+                wp.launch(propose, c.fast_workers, args + [self.plane_rejected, self.error], device=self.device,
+                          block_dim=self.group_query_block_dim)
+            if self.method == "direct_rounding":
+                wp.launch(_apply_direct_fraction, max(1, q.shape[0]),
+                          [q, self.candidate, self.node_fractions, self.plane_rejected,
+                           self.attempts, self.verified, direct_commit, self.error], device=self.device)
+                if direct_commit:
+                    return q
+            else:
+                wp.launch(get_independent_shortener(), q.shape[0],
+                          [q, self.candidate, self.node_fractions, self.error], device=self.device)
+                self.attempts.fill_(1)
+                self.verified.fill_(1)
             if c.capacity:
                 wp.launch(verify, c.fast_workers, args + [self.plane_rejected, self.error],
                           device=self.device, block_dim=self.group_query_block_dim)
             # Independent candidates have at most one mover, so dropping any
             # rejected vertex restores that pair's reference without affecting
             # certificates for other moving vertices in this group.
-            self.attempts.fill_(1)
-            self.verified.fill_(1)
-            if unclipped is not None:
-                wp.launch(_restore_stalled_proposals, q.shape[0],
-                          [q, self.candidate, unclipped, self.plane_rejected, True, self.error], device=self.device)
             wp.launch(publish, q.shape[0], [q, self.candidate, self.plane_rejected, self.error], device=self.device)
             return q
         wp.launch(_begin, 1, [self.condition, self.attempts, self.verified, self.error], device=self.device)
@@ -420,9 +402,6 @@ class CcdBackend:
                 [self.condition, self.attempts, self.verified, self.fraction, self.max_rounds, self.error], device=self.device)
 
         wp.capture_while(self.condition, round_body)
-        if unclipped is not None:
-            wp.launch(_restore_stalled_proposals, q.shape[0],
-                      [q, self.candidate, unclipped, None, False, self.error], device=self.device)
         wp.launch(_commit, q.shape[0], [self.candidate, q, self.verified, self.error], device=self.device)
         return q
 
@@ -621,6 +600,25 @@ def direct_pair_proposal(positions: wp.array[wp.vec3], proposed: wp.array[wp.vec
 
 
 @wp.func_native(_INPUT + r"""
+    bool full = false;
+    float prefix = ipc_gpu::ccd32direct::propose_fraction(query, &full);
+    if (prefix == 0.0f) {
+        bool refined_full = false;
+        prefix = ipc_gpu::ccd_clearance::grouped_fraction(query, refined_full);
+        full = full || refined_full;
+    }
+    if (prefix < 0.0f) result[1] = 2.0f;
+    else {
+        result[0] = prefix;
+        result[2] = full ? 1.0f : 0.0f;
+    }
+    return result;
+""")
+def direct_group_proposal(positions: wp.array[wp.vec3], proposed: wp.array[wp.vec3], nodes: wp.vec4i,
+                          kind: int) -> PairResult: ...
+
+
+@wp.func_native(_INPUT + r"""
     const auto status=ipc_gpu::ccd32direct::validate_linear(query);
     result[2]=status==ipc_gpu::ccd32::Status::Safe?1.0f:0.0f;
     return result;
@@ -652,13 +650,14 @@ def _plane_mover(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], nodes: wp.v
 def get_plane_kernels(method="plane"):
     if method not in ("plane", "direct_rounding"):
         raise ValueError("Expected a bounded direct CCD method")
-    pair_proposal = plane_pair_proposal if method == "plane" else direct_pair_proposal
+    direct = method == "direct_rounding"
+    pair_proposal = direct_group_proposal if direct else plane_pair_proposal
     pair_certificate = plane_pair_certificate if method == "plane" else direct_pair_certificate
     @wp.kernel(module="unique", enable_backward=False)
     def propose(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], ids: wp.array[int],
                 triangles: wp.array2d[int], edges: wp.array2d[int], info: TriMeshCollisionInfo,
                 offsets: wp.array[int], current: wp.array[int], workers: int,
-                fractions: wp.array[float], error: wp.array[int]):
+                fractions: wp.array[float], full_rejected: wp.array[int], error: wp.array[int]):
         group = current[0]
         if error[0] == 0:
             if group < 0 or group + 1 >= offsets.shape[0]:
@@ -678,7 +677,11 @@ def get_plane_kernels(method="plane"):
                             if result[1] != 0.0:
                                 wp.atomic_max(error, 0, 202)
                             else:
-                                wp.atomic_min(fractions, mover, result[0])
+                                if result[0] < 1.0:
+                                    wp.atomic_min(fractions, mover, result[0])
+                                if wp.static(direct):
+                                    if result[2] == 0.0:
+                                        wp.atomic_max(full_rejected, mover, 1)
 
     @wp.kernel(module="unique", enable_backward=False)
     def verify(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], ids: wp.array[int],
@@ -710,6 +713,8 @@ def get_plane_kernels(method="plane"):
 
     for kernel in (propose, verify, publish):
         configure_module(kernel)
+    if direct:
+        _configure(propose, ("ccd_clearance.cuh",))
     return propose, verify, publish
 
 
@@ -747,5 +752,5 @@ def __getattr__(name):
 
 
 # Fast kernels share this source file but never a cold compilation unit.
-for _kernel in (_prepare, _begin, _begin_round, _certify, _shorten, _next, _commit, _restore_stalled_proposals, _commit_direct):
+for _kernel in (_prepare, _begin, _begin_round, _certify, _shorten, _next, _commit, _apply_direct_fraction):
     configure_module(_kernel, mode="fast")

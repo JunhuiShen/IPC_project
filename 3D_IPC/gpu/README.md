@@ -128,11 +128,12 @@ Run the repository launchers from `3D_IPC/`.
 
 Use this configuration for the 2,500-vertex twisting-cloth benchmark. It runs
 Gauss–Seidel with three substeps per frame and three iterations per substep.
-Enable stalled-step fallback for both the level-based guess and the GS updates,
-and turn off the extra CCD endpoint check.
-
-Run the command below on `biot.math.ucdavis.edu`. The 480-frame benchmark
-averaged 57.54 s of solver time on the RTX 6000 Ada.
+The driven boundary, the level-based guess, and the GS updates each check their
+own motion. Both the guess and GS keep the CCD step, including zero. The study
+uses a CCD gap floor of `8.23045e-6` and a barrier activation distance of
+`0.002`. The predictor drops pairs only when their full swept boxes clear the
+barrier distance, then applies the existing greedy coloring to the retained
+graph. Five 480-frame runs averaged 44.06 s of solver time on the RTX 6000 Ada. Run this command on `biot.math.ucdavis.edu`.
 
 ```bash
 cd ~/ipc_runs/profile_direct_gs.PjqfuZ/stock
@@ -140,7 +141,7 @@ source ../env.sh
 out=$(mktemp -d "$PWD/repeat.XXXXXX")
 "$GPU_PY" -B run_twist.py --output "$out/run.npz" \
   --frames 480 --substeps 3 --iterations 3 --ccd-method direct_rounding \
-  --gs-stalled-step-fallback true --guess-stalled-step-fallback true \
+  --gs-stalled-step-fallback false --guess-stalled-step-fallback false \
   --exact-computation-fallback false
 ```
 
@@ -408,17 +409,23 @@ as described above. Our DAT path
 currently rejects rigid bodies; use GS for rigid and mixed scenes. OGC,
 cloth-grid and Jacobi modes are not available in this GPU driver.
 
-For deformable GS experiments, `--gs-ccd-accept-uncertified` uses the
-box-clamped proposal when update CCD would leave a vertex stationary.
-For the level-based predictor, the separate opt-in
-`--gs-ccd-guess-accept-uncertified` uses the predicted position if CCD
-would otherwise leave the vertex stationary. The discarded probe and
-updating sweeps use the same acceptance rule. Both options keep certified
-partial steps and can allow crossings. On native scenes, select the
+The deformable GS solver applies the certified CCD displacement in each
+color. Its discarded predictor probe and accepted level-based sweep follow
+the same rule. On native scenes, select the
 level-based guess with `--use_colored_ccd_guess false
 --use_colored_ccd_guess_level_based true --colored_ccd_guess_iters 1`.
-On `--stock-cloth-twist`, the predictor opt-in selects one level-based
-updating sweep.
+On `--stock-cloth-twist`, use `--level-based-ccd-guess` for one updating
+sweep. The stock twist stages and checks the prescribed pin motion first.
+When a moving pin needs clearance, the initializer can move the affected
+free corners using a rotation interpolated between the driven edges. A
+remaining obstruction can request a bounded correction of free corners.
+The initializer rebuilds the swept candidate list after each correction
+and certifies the complete motion before publishing it. Free vertices
+then participate normally in the velocity guess and GS iterations.
+The single-sweep direct predictor filters certified distant pairs before
+coloring. It uses the existing greedy color rule for its probe and the
+existing level construction for its updating sweep. Color labels can change
+when the filtered graph has fewer dependencies.
 
 For native scene runs:
 
@@ -449,7 +456,15 @@ with exact replay for unresolved contact geometry. Its level-based predictor
 always uses contact-incidence ordering within each color. For GS
 `direct_rounding`, `exact_computation_fallback=true` adds a separate FP32
 check of shortened stored endpoints. Both settings use the same direct
-fraction solve and rounding bounds.
+fraction solve and rounding bounds. Within an independent group, every
+affected pair must approve a full stored move. If one pair clips it, GS
+uses the minimum fraction certified for rounded prefixes. Closing moves
+reserve 80% of the projected clearance above the CCD floor to reduce
+rounding stalls in later iterations. If the FP32 bound returns zero, the
+grouped direct solver refines the separating-axis calculation on the GPU
+using outward-rounded binary64 projections of the represented FP32
+positions. It can approve the original endpoint independently of smaller
+rounded fractions.
 Shared broad-phase movement radii are converted inward from their float64
 storage before CCD uses them.
 

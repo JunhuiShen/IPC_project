@@ -13,6 +13,7 @@ import math
 
 import warp as wp
 
+from .ccd_defaults import LINEAR_CCD_GAP_FLOOR
 from .contact import decode_candidate
 from .warp_build import configure_module as _configure
 
@@ -331,15 +332,10 @@ class InitialGuess:
         self.independent_colors = independent_colors
         self.device, self.model = ccd.device, ccd.model
         n = self.model.particle_count
-        accept_uncertified = params.get("gs_ccd_guess_accept_uncertified", False) if params is not None else False
-        if not isinstance(accept_uncertified, bool):
-            raise TypeError("gs_ccd_guess_accept_uncertified must be a bool")
-        if accept_uncertified and not (independent_colors and params.get("use_colored_ccd_guess_level_based", False)):
-            raise ValueError("Uncertified predictor fallback requires independent level-based CCD")
-        self._unclipped = wp.empty(n, wp.vec3, device=self.device) if accept_uncertified else None
         self.start = wp.empty(n, wp.vec3, device=self.device)
         self.targets = wp.empty(n, wp.vec3, device=self.device)
         self.proposal = wp.empty(n, wp.vec3, device=self.device)
+        self.box_filter = None
         self.sweep_start = wp.empty(n, wp.vec3, device=self.device)
         self.color = wp.zeros(1, int, device=self.device)
         self.color_condition = wp.zeros(1, int, device=self.device)
@@ -367,8 +363,7 @@ class InitialGuess:
                 # corner moves per pair. Keep unrelated vertices' full steps,
                 # as CPU colored prediction does, with unchanged gap checks.
                 self.ccd.accept(q, self.targets, -1, dt, bounded=False, preserve_gap=True,
-                    colors=colors, current_color=self.color, query_view=query_view, independent=True,
-                    unclipped=self._unclipped)
+                    colors=colors, current_color=self.color, query_view=query_view, independent=True)
             else:
                 wp.launch(_color_proposal, self.model.particle_count,
                     [q, self.targets, self.model.particle_flags, colors, self.color, self.proposal], device=self.device)
@@ -391,10 +386,6 @@ class InitialGuess:
         fraction = params.get("colored_ccd_guess_fraction", 1.0)
         if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 0:
             raise ValueError("Colored CCD sweeps must be a nonnegative integer")
-        if params.get("gs_ccd_guess_accept_uncertified", False) != (self._unclipped is not None):
-            raise ValueError("Prepare the predictor with the requested uncertified fallback setting")
-        if self._unclipped is not None and (not level or sweeps == 0):
-            raise ValueError("Uncertified predictor fallback requires an active level-based CCD guess")
         if isinstance(fraction, bool) or not math.isfinite(fraction) or not 0 <= fraction <= 1:
             raise ValueError("Colored CCD fraction must be in [0,1]")
         global_guess = bool(params.get("use_ccd_guess", False)) and not legacy and not level
@@ -418,6 +409,13 @@ class InitialGuess:
             return self.ccd.accept(q, self.targets, -1, dt, bounded=False)
         if self.graph is None:
             raise RuntimeError("Prepare colored predictor workspaces before CUDA graph capture")
+        # The probe and first updating sweep each start at the same positions.
+        # Every rounded prefix lies in the padded swept box. A whole-box
+        # separation beyond the barrier radius excludes all possible contacts,
+        # even when the four corners move in different groups.
+        if (self.box_filter is not None and level and sweeps == 1
+                and params["d_hat"] >= LINEAR_CCD_GAP_FLOOR):
+            self.box_filter.apply(self.start, previous, c.swept_lower, c.swept_upper, params)
         g = self.graph
         g.build(c)
         if self.query_groups is not None:

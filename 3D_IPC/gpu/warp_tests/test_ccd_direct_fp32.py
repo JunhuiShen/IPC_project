@@ -114,6 +114,29 @@ if wp is not None:
 
     configure_module(__name__, ("ccd_direct_fp32.cuh",))
 
+    @wp.func_native(r"""
+        ipc_gpu::ccd32::LinearQuery q;
+        q.vertex_face=false;
+        q.gap_floor=1.0f/121500.0f;
+        for(int i=0;i<4;++i)for(int k=0;k<3;++k){
+            q.start[i][k]=start.data[i][k]; q.end[i][k]=end.data[i][k];
+        }
+        bool ordinary=false,refined=false;
+        wp::vec_t<4,float> result;
+        result[0]=ipc_gpu::ccd32direct::propose_fraction(q,&ordinary);
+        result[1]=ordinary?1.0f:0.0f;
+        result[2]=ipc_gpu::ccd_clearance::grouped_fraction(q,refined);
+        result[3]=refined?1.0f:0.0f;
+        return result;
+    """)
+    def _edge_votes(start: wp.array[wp.vec3], end: wp.array[wp.vec3]) -> wp.vec4: ...
+
+    @wp.kernel(module="unique", enable_backward=False)
+    def _record_votes(start: wp.array[wp.vec3], end: wp.array[wp.vec3], result: wp.array[wp.vec4]):
+        result[0] = _edge_votes(start, end)
+
+    configure_module(_record_votes, ("ccd_direct_fp32.cuh", "ccd_clearance.cuh"))
+
 
 @unittest.skipIf(wp is None, "Warp is not installed; compiler-only checks remain available")
 class Float32DirectWarpTests(unittest.TestCase):
@@ -146,6 +169,24 @@ class Float32DirectWarpTests(unittest.TestCase):
             capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(json.loads(result.stdout)["all_passed"])
+
+    def test_refine_zero_for_opening_edges_five_nanounits_above_floor(self):
+        # The four vertices of this registered pair stopped moving together.
+        # For this move the actual distance grows from 8.23575e-6 to 8.42507e-6.
+        start = np.float32([[-.010575661435723305, -.2642684876918793, .013920449651777744],
+                            [.011351419612765312, -.23759907484054565, -.008438249118626118],
+                            [-.0010478956392034888, -.2709495723247528, .004168310202658176],
+                            [.010973691008985043, -.2360098958015442, -.008062047883868217]])
+        end = start.copy()
+        end[0] = [-.01057292427867651, -.26423951983451843, .013921452686190605]
+        for device in self.devices:
+            votes = wp.zeros(1, wp.vec4, device=device)
+            wp.launch(_record_votes, 1, [wp.array(start, wp.vec3, device=device),
+                      wp.array(end, wp.vec3, device=device), votes], device=device)
+            _, _, prefix, refined_full = votes.numpy()[0]
+            self.assertEqual(refined_full, 1)
+            self.assertTrue(0 <= prefix <= 1)
+        self.assert_exact_committed([(start, end, 1, np.float32(1/121500))])
 
     def test_each_moving_role_clips_and_revalidates_actual_endpoints_on_cpu_cuda(self):
         starts, ends, kinds, labels, movers = [], [], [], [], []
@@ -315,28 +356,27 @@ class Float32DirectWarpTests(unittest.TestCase):
                         cases.append((data.start[:4], actual[:4], int(edge), 1e-7))
             self.assert_exact_committed(cases)
 
-    def test_direct_commit_keeps_partial_steps_and_restores_only_stalled_steps(self):
+    def test_direct_commit_keeps_zero_and_partial_steps_with_or_without_a_proposal_snapshot(self):
         from gpu.ccd import CcdBackend
         from .test_ccd_independent import accept, fixture
         for device in self.devices:
             for height in (0.0, 0.1):
-                for fallback in (False, True):
+                for save_proposal in (False, True):
                     data = fixture(device, height=height)
                     data.model.ipc = SimpleNamespace(params={"ccd_method": "direct_rounding"})
                     backend = CcdBackend(data.contacts, node_box_radius=2, exact_geometry=False)
                     proposed = data.start.copy()
                     proposed[0, 2] = -0.1
                     proposed[4, 0] += 0.25
-                    saved = wp.empty_like(data.q) if fallback else None
+                    saved = wp.empty_like(data.q) if save_proposal else None
                     accept(data, backend, wp.array(proposed, wp.vec3, device=device),
                            bounded=False, unclipped=saved)
                     backend.check()
                     actual = data.q.numpy()
-                    if fallback:
+                    if save_proposal:
                         np.testing.assert_array_equal(saved.numpy(), proposed)
                     if height == 0.0:
-                        expected = proposed[0] if fallback else data.start[0]
-                        np.testing.assert_array_equal(actual[0], expected)
+                        np.testing.assert_array_equal(actual[0], data.start[0])
                     else:
                         self.assertGreater(actual[0, 2], 0.0)
                         self.assertLess(actual[0, 2], height)

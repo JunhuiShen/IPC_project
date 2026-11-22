@@ -255,7 +255,7 @@ def main(argv=None):
     parser.add_argument("--no-planar-dat", action="store_true",
                         help="for our-energy DAT, disable solver contact energies and DAT limits; explicit predictor/color CCD remains enabled; --color-ccd-contact-forces can restore mesh forces")
     parser.add_argument("--level-based-ccd-guess", action="store_true",
-                        help="for --solver dat, replace the native predictor with our GPU level-based CCD initial guess")
+                        help="use the GPU level-based CCD initial guess for GS or DAT")
     parser.add_argument("--ccd-method", choices=("interval", "plane", "direct_rounding"),
                         help="CCD method for GS updates and prediction, or for the DAT predictor")
     parser.add_argument("--colored-ccd-guess-iters", type=_nonnegative,
@@ -276,10 +276,8 @@ def main(argv=None):
                         help="with --color-ccd, assemble IPC barrier and friction forces before each VBD color update")
     parser.add_argument("--no-collisions", action="store_true",
                         help="for deformable GS, disable collision processing, CCD and movement-box limits")
-    parser.add_argument("--gs-ccd-accept-uncertified", action="store_true",
-                        help="for deformable GS, use the box-clamped proposal if update CCD would leave the vertex stationary")
-    parser.add_argument("--gs-ccd-guess-accept-uncertified", action="store_true",
-                        help="for GS level-based CCD, use the predictor target if it would leave the vertex stationary")
+    parser.add_argument("--gs-ccd-accept-uncertified", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--gs-ccd-guess-accept-uncertified", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--vertex-contact-capacity", type=_positive,
                         help="triangle-contact/candidate row capacity per vertex (native scenes: 128; stock scene: its original default)")
     parser.add_argument("--edge-contact-capacity", type=_positive,
@@ -294,8 +292,8 @@ def main(argv=None):
     parser.add_argument("--check", action="store_true")
     options, native = parser.parse_known_args(argv)
     try:
-        if options.level_based_ccd_guess and options.solver != "dat":
-            raise ValueError("--level-based-ccd-guess requires --solver dat")
+        if options.level_based_ccd_guess and options.solver == "dat-reference":
+            raise ValueError("--level-based-ccd-guess requires --solver ipc or dat")
         if options.ccd_method is not None and options.solver != "ipc" and not options.level_based_ccd_guess:
             raise ValueError("--ccd-method for DAT requires --level-based-ccd-guess")
         if not options.level_based_ccd_guess and (options.colored_ccd_guess_iters is not None or
@@ -325,10 +323,9 @@ def main(argv=None):
             raise ValueError("--color-ccd-contact-forces requires --color-ccd")
         if options.no_collisions and options.solver != "ipc":
             raise ValueError("--no-collisions requires --solver ipc")
-        if options.gs_ccd_accept_uncertified and (options.solver != "ipc" or options.no_collisions):
-            raise ValueError("--gs-ccd-accept-uncertified requires --solver ipc with collisions enabled")
-        if options.gs_ccd_guess_accept_uncertified and (options.solver != "ipc" or options.no_collisions):
-            raise ValueError("--gs-ccd-guess-accept-uncertified requires --solver ipc with collisions enabled")
+        if options.gs_ccd_accept_uncertified or options.gs_ccd_guess_accept_uncertified:
+            raise ValueError("GS always keeps the CCD step. Remove the --gs-ccd-accept-uncertified "
+                             "and --gs-ccd-guess-accept-uncertified flags.")
         if options.solver in ("dat", "dat-reference"):
             from gpu import select_newton_runtime
             select_newton_runtime("reference")
@@ -356,10 +353,7 @@ def main(argv=None):
             if options.stock_cloth_twist:
                 if options.solver == "ipc":
                     from .dat_twist import run_gs
-                    return run_gs(forwarded, enable_collisions=not options.no_collisions,
-                                  **({"ccd_method": options.ccd_method} if options.ccd_method is not None else {}),
-                                  **({"accept_uncertified": True} if options.gs_ccd_accept_uncertified else {}),
-                                  **({"guess_accept_uncertified": True} if options.gs_ccd_guess_accept_uncertified else {}))
+                    return run_gs(forwarded, enable_collisions=not options.no_collisions, **guess_options)
                 from .dat_twist import run_own as run
                 return run(forwarded, enable_planar_dat=not options.no_planar_dat,
                            enable_broad_phase_boxes=options.build_broad_phase_boxes,
@@ -406,10 +400,6 @@ def main(argv=None):
                 exporter.scene["params"]["enable_color_ccd_contact_forces"] = True
             if options.no_collisions:
                 exporter.scene["params"]["collision_processing"] = False
-            if options.gs_ccd_accept_uncertified:
-                exporter.scene["params"]["gs_ccd_accept_uncertified"] = True
-            if options.gs_ccd_guess_accept_uncertified:
-                exporter.scene["params"]["gs_ccd_guess_accept_uncertified"] = True
             model = scene.create_model(exporter.scene, device)
             solver_class = solver_module.SolverIPC if options.solver == "ipc" else solver_module.SolverDAT
             # Native scenes supply their interaction distance. Use the same

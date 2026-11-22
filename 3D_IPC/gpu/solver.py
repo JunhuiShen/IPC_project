@@ -1029,20 +1029,15 @@ class SolverIPC(SolverVBD):
         self.error = wp.zeros(1, int, device=model.device)
         self._failed = False
         self.params = p
+        self.prescribed_boundary = None
         self.enable_collisions = enable_collisions
         self._contact_aware_gs = bool(p.get("contact_aware_gs", True)) and model.body_count == 0 and model.particle_count > 0
-        accept_uncertified = p.get("gs_ccd_accept_uncertified", False)
-        if not isinstance(accept_uncertified, bool):
-            raise TypeError("gs_ccd_accept_uncertified must be a bool")
-        if accept_uncertified and not (enable_collisions and p["use_ccd"] and self._contact_aware_gs):
-            raise ValueError("Uncertified CCD fallback requires contact-aware deformable GS with CCD enabled")
-        self._unclipped_ccd_proposals = wp.empty_like(model.particle_q) if accept_uncertified else None
-        guess_accept_uncertified = p.get("gs_ccd_guess_accept_uncertified", False)
-        if not isinstance(guess_accept_uncertified, bool):
-            raise TypeError("gs_ccd_guess_accept_uncertified must be a bool")
-        if guess_accept_uncertified and not (
-                enable_collisions and model.body_count == 0 and p.get("use_colored_ccd_guess_level_based", False)):
-            raise ValueError("Uncertified predictor fallback requires deformable GS with level-based CCD enabled")
+        # Older scene files may request overriding a stalled CCD step.
+        for option in ("gs_ccd_accept_uncertified", "gs_ccd_guess_accept_uncertified"):
+            if option in p:
+                if not isinstance(p[option], bool):
+                    raise TypeError(f"{option} must be a bool")
+                p[option] = False
         self._box_radius = float(p["node_box_max"])
         self._adaptive_node_boxes = enable_collisions and bool(p.get("adaptive_node_boxes", True))
         self.movement_boxes = MovementBoxes(model, p["node_box_min"], p["node_box_max"]) if enable_collisions else None
@@ -1099,8 +1094,6 @@ class SolverIPC(SolverVBD):
             p.get("use_colored_ccd_guess_level_based", False) or
             (p.get("use_ccd_guess", False) and not model.ipc.payload.get("uses_general_solver", False) and model.body_count == 0))
         self._guess_requested = enable_collisions and requested_predictor
-        if guess_accept_uncertified and (not self._guess_requested or p.get("colored_ccd_guess_iters", 0) == 0):
-            raise ValueError("Uncertified predictor fallback requires at least one level-based updating sweep")
         self._unrestricted_guess = not enable_collisions and requested_predictor
         self._unrestricted_guess_fraction = 1.0
         if self._unrestricted_guess:
@@ -1152,10 +1145,12 @@ class SolverIPC(SolverVBD):
             "mesh_collision_detection": enable_collisions,
             "ccd_enabled": enable_collisions and bool(p["use_ccd"]),
             "ccd_precision": "float32",
-            "ccd_uncertain_policy": ("use the box-clamped proposal if GS CCD stalls"
-                                     if accept_uncertified else "conservative backtracking; no higher-precision fallback"),
-            "gs_ccd_accept_uncertified": accept_uncertified,
-            "gs_ccd_guess_accept_uncertified": guess_accept_uncertified,
+            "ccd_zero_fraction_refinement": (
+                "binary64 projection of represented float32 positions"
+                if enable_collisions and p.get("ccd_method") == "direct_rounding" else None),
+            "ccd_uncertain_policy": "keep the CCD-approved step; a zero step leaves the vertex in place",
+            "gs_ccd_accept_uncertified": False,
+            "gs_ccd_guess_accept_uncertified": False,
             "predictor_ccd_enabled": self._guess_requested,
             "movement_bounds_enabled": enable_collisions,
             "planar_dat_enabled": False,
@@ -1189,6 +1184,8 @@ class SolverIPC(SolverVBD):
             if self._adaptive_node_boxes and p.get("gs_prune_box_contacts", True):
                 from .movement_box_queries import GsBoxEpochFilter
                 self._box_filter = GsBoxEpochFilter(self.contact_backend)
+                if self._guess_requested and self.ccd_backend.method == "direct_rounding":
+                    self.ccd_backend._initial_guess.box_filter = self._box_filter
         self._rigid = None
         if model.body_count:
             from .rigid import BodySolver
@@ -1251,6 +1248,8 @@ class SolverIPC(SolverVBD):
                     state_in.particle_f, m.particle_flags],
             outputs=[self.inertia, self.particle_displacements], device=self.device)
         self.particle_displacements.zero_()
+        if self.prescribed_boundary is not None:
+            self.prescribed_boundary.advance(self, state_in.particle_q, state_out.particle_q, dt)
         if self.enable_collisions:
             self.sdf_backend.prepare(dt)
         else:
@@ -1332,8 +1331,7 @@ class SolverIPC(SolverVBD):
                 center=self.pos_prev_collision_detection, radius=self._box_radius,
                 radii=self.movement_boxes.radii if self._adaptive_node_boxes else None,
                 colors=gs.colors, current_color=gs.current_color, query_view=gs.query_view,
-                independent=True, bounded=True, clip_ccd=bool(self.params["use_ccd"]),
-                unclipped=self._unclipped_ccd_proposals)
+                independent=True, bounded=True, clip_ccd=bool(self.params["use_ccd"]))
 
         if self.skip_empty_mesh_contacts and self.device.is_cuda and self.device.is_capturing:
             # Check parameters even when the device branch skips mesh
