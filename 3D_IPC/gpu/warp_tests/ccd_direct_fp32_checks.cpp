@@ -2,6 +2,7 @@
 // Exact dyadic arithmetic is test-only: every accepted represented trajectory
 // is checked by the existing exact geometric collision oracle.
 #include "ccd_direct_fp32.cuh"
+#include "ccd_direct_multi_axis.cuh"
 #include "exact.cuh"
 
 #include <cmath>
@@ -15,6 +16,7 @@
 using ipc_gpu::ccd32::LinearQuery;
 using ipc_gpu::ccd32::Status;
 namespace direct = ipc_gpu::ccd32direct;
+namespace multi_axis = ipc_gpu::ccd32direct_multi;
 using ExactStatus = ipc_gpu::exact::Status;
 
 static_assert(std::is_same<decltype(ipc_gpu::ccd32::ClipResult{}.fraction), float>::value,
@@ -96,6 +98,21 @@ ipc_gpu::ccd32::ClipResult check(const LinearQuery& q, bool use_oracle = true) {
     const float proposal = direct::propose_fraction(q);
     require(std::isfinite(proposal) && proposal >= 0.0f && proposal <= 1.0f,
             "Valid query produced an invalid direct fraction");
+    const float retried = multi_axis::propose_fraction(q);
+    require(std::isfinite(retried) && retried >= 0.0f && retried <= 1.0f,
+            "Invalid multi-axis direct proposal");
+    if (proposal > 0.0f)
+        require(retried == proposal, "Multi-axis retry changed a positive direct fraction");
+    // Exercise the same acceptance rule as VBD, including fractions shortened
+    // by another incident pair. Check the actual represented segment independently.
+    for (float fraction : {retried, 0.375f * retried}) {
+        const auto represented = at_fraction(q, fraction);
+        if (!use_oracle || unchanged(represented)) continue;
+        if (fraction == 1.0f || multi_axis::validate_linear(represented) == Status::Safe) {
+            require(exact(represented) == ExactStatus::Safe, "Multi-axis path crossed a primitive");
+            exact_endpoint_gap(represented);
+        }
+    }
     const auto result = direct::clip_linear(q);
     require(result.status == Status::Safe, "Valid query did not yield a safe clipped result");
     require(std::isfinite(result.fraction) && result.fraction >= 0.0f
@@ -189,6 +206,7 @@ void expect_invalid(const LinearQuery& q) {
     require(direct::validate_linear(q) == Status::Invalid, "Invalid query was not rejected");
     require(direct::clip_linear(q).status == Status::Invalid, "Invalid query was clipped as valid");
     require(direct::propose_fraction(q) < 0.0f, "Invalid query yielded a nonnegative proposal");
+    require(multi_axis::propose_fraction(q) < 0.0f, "Multi-axis retry accepted an invalid query");
     ++invalid;
 }
 
@@ -383,6 +401,8 @@ int main(int argc, char** argv) {
             require(direct::validate_linear(q) != Status::Safe,
                     "Strict floor policy accepted a sub-floor or equal-floor moving start");
             require(check(q).fraction == 0.0f, "Sub-floor start made new represented motion");
+            require(multi_axis::propose_fraction(q) == 0.0f,
+                    "Multi-axis retry bypassed a touching, equal-floor or sub-floor start");
             ++subfloor;
         }
     }

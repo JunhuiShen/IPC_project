@@ -53,7 +53,8 @@ def _source_hashes(root):
         "gpu/dat_color_schedule.py", "gpu/dat_color_ccd.py", "gpu/dat_color_contacts.py",
         "gpu/contact.py", "gpu/contact.cuh", "gpu/contact_exact.cuh",
         "gpu/solver.py",
-        "gpu/ccd.py", "gpu/ccd.cuh", "gpu/ccd_fp32.cuh", "gpu/ccd_plane_fp32.cuh", "gpu/ccd_direct_fp32.cuh", "gpu/query_groups.py", "gpu/warp_build.py",
+        "gpu/ccd.py", "gpu/ccd.cuh", "gpu/ccd_fp32.cuh", "gpu/ccd_plane_fp32.cuh", "gpu/ccd_direct_fp32.cuh",
+        "gpu/ccd_direct_multi_axis.cuh", "gpu/ccd_clearance.cuh", "gpu/ccd_defaults.py", "gpu/query_groups.py", "gpu/warp_build.py",
         "gpu/exact.cuh", "gpu/original_ccd.cuh", "gpu/original_rigid.cuh", "gpu/direct_bound.cuh",
         "gpu/separation.cuh", "gpu/global_guess.cuh", "gpu/newton_dat/export_twist_trajectory.py",
         "gpu/movement_box_queries.py", "gpu/policies.py",
@@ -95,7 +96,7 @@ def main(argv=None):
                         help="with --variant own --no-planar-dat --build-broad-phase-boxes, color candidate pairs and use combined colors for VBD sweeps")
     parser.add_argument("--color-ccd", action="store_true",
                         help="with --variant own --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs, clip actual VBD color updates with independent per-vertex FP32 CCD")
-    parser.add_argument("--color-ccd-method", choices=("direct_rounding", "plane"), default="direct_rounding",
+    parser.add_argument("--color-ccd-method", choices=("direct_rounding", "direct_rounding_multi_axis", "motion_projection", "plane"), default="direct_rounding",
                         help="per-color CCD acceptance, independent of initial-guess --ccd-method (default: direct_rounding)")
     parser.add_argument("--color-ccd-accept-uncertified", action="store_true",
                         help="with --color-ccd-method plane, use the box-clamped proposal when CCD rejects all motion; allows crossings")
@@ -130,7 +131,7 @@ def main(argv=None):
                            not args.build_broad_phase_boxes or not args.color_barrier_pairs):
         parser.error("--color-ccd requires --variant own --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs")
     if args.color_ccd_method != "direct_rounding" and not args.color_ccd:
-        parser.error("--color-ccd-method plane requires --color-ccd")
+        parser.error(f"--color-ccd-method {args.color_ccd_method} requires --color-ccd")
     if args.color_ccd_accept_uncertified and (not args.color_ccd or args.color_ccd_method != "plane"):
         parser.error("--color-ccd-accept-uncertified requires --color-ccd --color-ccd-method plane")
     if args.color_ccd_contact_forces and not args.color_ccd:

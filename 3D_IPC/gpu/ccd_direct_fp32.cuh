@@ -141,8 +141,7 @@ IPC_DIRECT32_HD inline Interval projected_gap(const float* a, const float* b, Ve
     return result;
 }
 
-IPC_DIRECT32_HD inline bool prepare_axis(const LinearQuery& q, Vec& axis, float& threshold) {
-    if (!closest_axis(q, axis)) return false;
+IPC_DIRECT32_HD inline bool orient_axis(const LinearQuery& q, Vec& axis, float& threshold) {
     const Interval first = projected_gap(q.start[0], q.start[q.vertex_face ? 1 : 2], axis);
     if (!bounded(first)) return false;
     if (first.hi < 0.0f) axis = negate(axis);
@@ -153,6 +152,10 @@ IPC_DIRECT32_HD inline bool prepare_axis(const LinearQuery& q, Vec& axis, float&
     if (!finite(norm2_upper)) return false;
     threshold = multiply_bound(q.gap_floor, sqrt_upper(norm2_upper), true);
     return finite(threshold) && threshold > 0.0f;
+}
+
+IPC_DIRECT32_HD inline bool prepare_axis(const LinearQuery& q, Vec& axis, float& threshold) {
+    return closest_axis(q, axis) && orient_axis(q, axis, threshold);
 }
 
 IPC_DIRECT32_HD inline bool certify_axis(const LinearQuery& q, Vec axis, float threshold) {
@@ -270,40 +273,10 @@ IPC_DIRECT32_HD inline bool coordinate_clearance(const LinearQuery& q, int mover
     return false;
 }
 
-} // namespace detail
+constexpr float retained_clearance = 0.8f;
 
-IPC_DIRECT32_HD inline Status validate_linear(const LinearQuery& q) {
-    if (!ccd32::detail::valid(q)) return Status::Invalid;
-    const int mover = detail::moving_vertex(q);
-    if (mover == -2) return Status::Invalid;
-    if (mover == -1) return Status::Safe;
-    ccd32::detail::Vec axis;
-    float threshold;
-    return detail::prepare_axis(q, axis, threshold)
-        && detail::certify_axis(q, axis, threshold) ? Status::Safe : Status::Uncertain;
-}
-
-// Grouped GS also certifies the complete stored move. Reserving clearance
-// when moving towards a contact keeps subsequent updates off the rounding floor.
-IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q, bool* full_step = nullptr) {
-    using namespace detail;
-    if (full_step) *full_step = false;
-    if (!valid(q)) return -1.0f;
-    const int mover = moving_vertex(q);
-    if (mover == -2) return -1.0f;
-    if (mover == -1) {
-        if (full_step) *full_step = true;
-        return 1.0f;
-    }
-    constexpr float retained_clearance = 0.8f;
-    if (full_step && detail::coordinate_clearance(q,mover,retained_clearance)) {
-        *full_step = true;
-        return 1.0f;
-    }
-    Vec axis;
-    float threshold;
-    if (!prepare_axis(q, axis, threshold)) return 0.0f;
-
+IPC_DIRECT32_HD inline float fraction_on_axis(const LinearQuery& q, int mover, Vec axis,
+                                              float threshold, bool* full_step) {
     const int split = q.vertex_face ? 1 : 2;
     float moving_gap = infinity();
     bool end_safe = true;
@@ -338,6 +311,41 @@ IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q, bool* full_s
     // Strictly interior, including when downward division happened to be
     // exact. This also keeps the proposal on interpolate's FMA branch.
     return fraction > 0.0f ? maximum(0.0f, neighbor(fraction, false)) : 0.0f;
+}
+
+} // namespace detail
+
+IPC_DIRECT32_HD inline Status validate_linear(const LinearQuery& q) {
+    if (!ccd32::detail::valid(q)) return Status::Invalid;
+    const int mover = detail::moving_vertex(q);
+    if (mover == -2) return Status::Invalid;
+    if (mover == -1) return Status::Safe;
+    ccd32::detail::Vec axis;
+    float threshold;
+    return detail::prepare_axis(q, axis, threshold)
+        && detail::certify_axis(q, axis, threshold) ? Status::Safe : Status::Uncertain;
+}
+
+// Grouped GS also certifies the complete stored move. Reserving clearance
+// when moving towards a contact keeps subsequent updates off the rounding floor.
+IPC_DIRECT32_HD inline float propose_fraction(const LinearQuery& q, bool* full_step = nullptr) {
+    using namespace detail;
+    if (full_step) *full_step = false;
+    if (!valid(q)) return -1.0f;
+    const int mover = moving_vertex(q);
+    if (mover == -2) return -1.0f;
+    if (mover == -1) {
+        if (full_step) *full_step = true;
+        return 1.0f;
+    }
+    if (full_step && coordinate_clearance(q, mover, retained_clearance)) {
+        *full_step = true;
+        return 1.0f;
+    }
+    Vec axis;
+    float threshold;
+    if (!prepare_axis(q, axis, threshold)) return 0.0f;
+    return fraction_on_axis(q, mover, axis, threshold, full_step);
 }
 
 IPC_DIRECT32_HD inline ClipResult clip_linear(const LinearQuery& q) {

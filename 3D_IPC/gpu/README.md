@@ -264,9 +264,26 @@ share a checkpoint.
 ### Apply our CCD to actual VBD color updates
 
 Add `--color-ccd` to clip each VBD color's proposed vertex updates with our
-FP32 CCD. `--color-ccd-method direct_rounding` remains the default;
-`--color-ccd-method plane` selects the alternative that tests multiple
-separating directions:
+FP32 CCD. The default is `--color-ccd-method direct_rounding`.
+`--color-ccd-method direct_rounding_multi_axis` retries a zero direct
+proposal using the coordinate axes and a geometric axis selected in FP64
+from the native GS candidate directions. It tests clearance and rounded
+motion in FP32. This option controls the VBD color updates. The predictor
+uses `--ccd-method` independently.
+
+`--color-ccd-method motion_projection` tests the proposed motion direction
+when a point moves against a fixed triangle. It takes a zero step if the
+starting distance is at most `1e-8`. Above this clearance it projects the
+vector from the point to its closest point on the triangle onto the unit
+motion direction. A zero or negative projection accepts the full move
+(tangential or departing motion). For a positive projection, the rule
+subtracts `1e-8`, divides by the motion length and clamps the fraction to
+`[0, 1]`. The point branch uses FP32 and applies the fraction directly.
+Rounding the accepted position can leave a gap smaller than `1e-8`.
+Moving triangle corners and edge-edge pairs use `direct_rounding_multi_axis`.
+
+`--color-ccd-method plane` selects the separate plane-based algorithm.
+To enable per-color clipping on the stock twist:
 
 ```sh
 .venv-gpu/bin/python -m gpu.run --solver dat --stock-cloth-twist \
@@ -305,8 +322,9 @@ SDF contacts are not enabled by this flag.
 This per-color contact path now uses the project's complete barrier
 self-Hessian (including distance curvature) and project frozen-friction
 gradient/Hessian. Contact geometry and derivatives use binary64 arithmetic
-on the GPU, then contribute to FP32 local systems; both per-color CCD methods
-remain FP32 without rational arithmetic or bisection. The separate
+on the GPU, then contribute to FP32 local systems. The per-color CCD methods
+use FP32 bounds and updates. Multi-axis retries select a geometric axis in
+FP64. The separate
 Planar DAT contact adapter still retains native rank-one contact blocks and
 native friction.
 

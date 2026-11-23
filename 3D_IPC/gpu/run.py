@@ -268,7 +268,7 @@ def main(argv=None):
                         help="with --solver dat --no-planar-dat --build-broad-phase-boxes, color candidate pairs and use combined colors for VBD sweeps")
     parser.add_argument("--color-ccd", action="store_true",
                         help="with --solver dat --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs, clip actual VBD color updates with independent per-vertex FP32 CCD")
-    parser.add_argument("--color-ccd-method", choices=("direct_rounding", "plane"), default="direct_rounding",
+    parser.add_argument("--color-ccd-method", choices=("direct_rounding", "direct_rounding_multi_axis", "motion_projection", "plane"), default="direct_rounding",
                         help="per-color CCD method, independent of --ccd-method (default: direct_rounding)")
     parser.add_argument("--color-ccd-accept-uncertified", action="store_true",
                         help="with --color-ccd-method plane, use the box-clamped proposal when CCD rejects all motion; allows crossings")
@@ -316,7 +316,7 @@ def main(argv=None):
                                   not options.build_broad_phase_boxes or not options.color_barrier_pairs):
             raise ValueError("--color-ccd requires --solver dat --no-planar-dat --build-broad-phase-boxes --color-barrier-pairs")
         if options.color_ccd_method != "direct_rounding" and not options.color_ccd:
-            raise ValueError("--color-ccd-method plane requires --color-ccd")
+            raise ValueError(f"--color-ccd-method {options.color_ccd_method} requires --color-ccd")
         if options.color_ccd_accept_uncertified and (not options.color_ccd or options.color_ccd_method != "plane"):
             raise ValueError("--color-ccd-accept-uncertified requires --color-ccd --color-ccd-method plane")
         if options.color_ccd_contact_forces and not options.color_ccd:

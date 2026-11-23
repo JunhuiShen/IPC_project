@@ -626,6 +626,24 @@ def direct_group_proposal(positions: wp.array[wp.vec3], proposed: wp.array[wp.ve
 def direct_pair_certificate(positions: wp.array[wp.vec3], proposed: wp.array[wp.vec3], nodes: wp.vec4i,
                            kind: int) -> PairResult: ...
 
+@wp.func_native(_INPUT + r"""
+    const float fraction = ipc_gpu::ccd32direct_multi::propose_fraction(query);
+    if (fraction < 0.0f) result[1] = 2.0f;
+    else result[0] = fraction;
+    return result;
+""")
+def direct_multi_axis_pair_proposal(positions: wp.array[wp.vec3], proposed: wp.array[wp.vec3],
+                                    nodes: wp.vec4i, kind: int) -> PairResult: ...
+
+
+@wp.func_native(_INPUT + r"""
+    const auto status = ipc_gpu::ccd32direct_multi::validate_linear(query);
+    result[2] = status == ipc_gpu::ccd32::Status::Safe ? 1.0f : 0.0f;
+    return result;
+""")
+def direct_multi_axis_pair_certificate(positions: wp.array[wp.vec3], proposed: wp.array[wp.vec3],
+                                       nodes: wp.vec4i, kind: int) -> PairResult: ...
+
 
 @wp.func
 def _plane_mover(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], nodes: wp.vec4i):

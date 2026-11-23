@@ -11,11 +11,80 @@ from functools import cache
 
 import numpy as np
 import warp as wp
+from newton._src.geometry.kernels import (
+    TRI_CONTACT_FEATURE_FACE_INTERIOR, closest_point_line_segment, triangle_closest_point,
+)
 
 from .ccd import (configure_module, direct_pair_proposal, direct_pair_certificate,
+                  direct_multi_axis_pair_proposal, direct_multi_axis_pair_certificate,
                   plane_pair_proposal, plane_pair_certificate,
                   _plane_mover, radius_float32, round_inside, get_independent_shortener)
+from .ccd_defaults import MOTION_PROJECTION_POINT_GAP
 from .query_groups import _unique_groups
+from .warp_build import configure_module as configure_headers
+
+
+@wp.func
+def _closest_triangle_offset(a: wp.vec3, b: wp.vec3, c: wp.vec3):
+    """Return the closest point relative to the moving point (the origin)."""
+    normal = wp.cross(b - a, c - a)
+    if wp.dot(normal, normal) > 0.0:
+        witness, _, feature = triangle_closest_point(a, b, c, wp.vec3(0.0))
+        if feature == TRI_CONTACT_FEATURE_FACE_INTERIOR:
+            # Reconstruct in the normal direction. A barycentric weighted sum
+            # can introduce a spurious tangential component in a face witness.
+            return normal * (wp.dot(a, normal) / wp.length_sq(normal))
+        return witness
+
+    # A collinear triangle is its longest segment, including a single point.
+    ab, ac, bc = wp.length_sq(b - a), wp.length_sq(c - a), wp.length_sq(c - b)
+    if ab >= ac and ab >= bc:
+        if ab == 0.0:
+            return a
+        return closest_point_line_segment(a, b, wp.vec3(0.0))
+    if ac >= bc:
+        return closest_point_line_segment(a, c, wp.vec3(0.0))
+    return closest_point_line_segment(b, c, wp.vec3(0.0))
+
+
+@wp.func
+def _point_moved(p: wp.vec3, target: wp.vec3):
+    return p[0] != target[0] or p[1] != target[1] or p[2] != target[2]
+
+
+@wp.func
+def _motion_projection_proposal(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3],
+                                nodes: wp.vec4i, kind: int):
+    # The caller has already checked that exactly one corner is moving.
+    p = q[nodes[0]]
+    if kind == 0 and _point_moved(p, candidate[nodes[0]]):
+        offset = _closest_triangle_offset(q[nodes[1]] - p, q[nodes[2]] - p, q[nodes[3]] - p)
+        motion = candidate[nodes[0]] - p
+        length = wp.length(motion)
+        distance = wp.length(offset)
+        if not wp.isfinite(distance) or not wp.isfinite(length):
+            return wp.vec3(0.0, 2.0, 0.0)
+        if distance <= MOTION_PROJECTION_POINT_GAP or length == 0.0:
+            return wp.vec3(0.0)
+        toward = wp.dot(offset, motion)
+        if toward <= 0.0:
+            # The initial closest point supplies a supporting plane. The
+            # proposed motion moves tangentially to it or farther away.
+            return wp.vec3(1.0, 0.0, 1.0)
+        projection = toward / length
+        alpha = wp.clamp((projection - MOTION_PROJECTION_POINT_GAP) / length, 0.0, 1.0)
+        return wp.vec3(alpha, 0.0, 0.0)
+    return direct_multi_axis_pair_proposal(q, candidate, nodes, kind)
+
+
+@wp.func
+def _motion_projection_certificate(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3],
+                                   nodes: wp.vec4i, kind: int):
+    # This experiment uses only the projection rule for a moving point. Other
+    # mover roles retain the multi-axis control's rounded endpoint check.
+    if kind == 0 and _point_moved(q[nodes[0]], candidate[nodes[0]]):
+        return wp.vec3(1.0, 0.0, 1.0)
+    return direct_multi_axis_pair_certificate(q, candidate, nodes, kind)
 
 
 @wp.kernel(module="unique", enable_backward=False)
@@ -85,10 +154,16 @@ def _prepare(q: wp.array[wp.vec3], reference: wp.array[wp.vec3], displacement: w
 @cache
 def get_color_ccd_kernels(method="direct_rounding"):
     """Bind only the pair acceptance rule; scheduling and reduction are shared."""
-    if method not in ("direct_rounding", "plane"):
-        raise ValueError("Color CCD method must be direct_rounding or plane")
-    pair_proposal = direct_pair_proposal if method == "direct_rounding" else plane_pair_proposal
-    pair_certificate = direct_pair_certificate if method == "direct_rounding" else plane_pair_certificate
+    rules = {
+        "direct_rounding": (direct_pair_proposal, direct_pair_certificate),
+        "direct_rounding_multi_axis": (direct_multi_axis_pair_proposal, direct_multi_axis_pair_certificate),
+        "motion_projection": (_motion_projection_proposal, _motion_projection_certificate),
+        "plane": (plane_pair_proposal, plane_pair_certificate),
+    }
+    if method not in rules:
+        raise ValueError(f"Color CCD method must be one of {', '.join(rules)}")
+    pair_proposal, pair_certificate = rules[method]
+
     @wp.kernel(module="unique", enable_backward=False)
     def _propose(q: wp.array[wp.vec3], candidate: wp.array[wp.vec3], nodes: wp.array[wp.vec4i],
                  pair_count: wp.array[int], primitive_offsets: wp.array[int],
@@ -142,7 +217,10 @@ def get_color_ccd_kernels(method="direct_rounding"):
                         if result[2] != 1.0:
                             wp.atomic_max(rejected, mover, 1)
     for kernel in (_propose, _verify):
-        configure_module(kernel)
+        if method in ("direct_rounding_multi_axis", "motion_projection"):
+            configure_headers(kernel, ("ccd_direct_multi_axis.cuh",))
+        else:
+            configure_module(kernel)
     return _propose, _verify
 
 

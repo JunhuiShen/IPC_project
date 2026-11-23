@@ -50,12 +50,66 @@ class ColorCcdTests(unittest.TestCase):
         wp.init()
         cls.devices = [wp.get_device("cpu"), *wp.get_cuda_devices()]
 
+    def test_motion_projection_moving_point(self):
+        # Q is (px,py,0) at the interior, (.25,0,0) on AB, and A at the vertex.
+        cases = [
+            ((.25, .25, .125), (0., 0., .25), 1.0),
+            ((.25, .25, .125), (.25, 0., 0.), 1.0),
+            ((.25, .25, .125), (0., 0., -.25), (.125 - 1e-8) / .25),
+            ((.25, -.125, 0.), (.25, 0., 0.), 1.0),
+            ((.25, -.125, 0.), (0., -.25, 0.), 1.0),
+            ((.25, -.125, 0.), (0., .25, 0.), (.125 - 1e-8) / .25),
+            ((-.125, -.125, 0.), (-.125, .125, 0.), 1.0),
+            ((-.125, -.125, 0.), (-.125, -.125, 0.), 1.0),
+            ((-.125, -.125, 0.), (.25, .25, 0.), .5 - 1e-8 / np.hypot(.25, .25)),
+            ((.25, .25, 1e-8), (0., 0., .25), 0.0),
+            ((.25, .25, 5e-9), (0., 0., .25), 0.0),
+        ]
+        for device in self.devices:
+            for start, step, expected in cases:
+                with self.subTest(device=str(device), start=start, step=step):
+                    points = np.float32([start, (0, 0, 0), (1, 0, 0), (0, 1, 0)])
+                    model, _, graph, ccd, error, reference, displacement = workspace(
+                        device, points, [[1, 2, 3]], method="motion_projection")
+                    self.assertEqual(int(graph.candidate_count.numpy()[0]), 1)
+                    graph.current_color.fill_(int(graph.colors.numpy()[0]))
+                    motion = np.zeros_like(points)
+                    motion[0] = step
+                    displacement.assign(motion)
+                    ccd.apply(model.particle_q, reference, displacement)
+                    self.assertEqual(int(error.numpy()[0]), 0)
+                    self.assertAlmostEqual(float(ccd.fractions.numpy()[0]), expected, delta=1e-7)
+                    accepted = model.particle_q.numpy()
+                    np.testing.assert_allclose(accepted[0], points[0] + expected * motion[0], atol=1e-7)
+                    np.testing.assert_array_equal(accepted[1:], points[1:])
+
+    def test_motion_projection_preserves_other_movers(self):
+        pt = np.float32([[.25, .25, .25], [0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
+        ee = np.float32([[-1., 0., .25], [1., 0., .25], [0., -1., 0.], [0., 1., 0.]])
+        for device in self.devices:
+            for points, triangles, edges, moving in (
+                (pt, [[1, 2, 3]], [], 1),
+                (ee, [], [[-1, -1, 0, 1], [-1, -1, 2, 3]], 2),
+            ):
+                results = []
+                for method in ("motion_projection", "direct_rounding_multi_axis"):
+                    model, _, g, ccd, error, ref, disp = workspace(device, points, triangles, edges, method=method)
+                    g.current_color.fill_(int(g.colors.numpy()[moving]))
+                    motion = np.zeros_like(points)
+                    motion[moving, 2] = 2.0
+                    disp.assign(motion)
+                    ccd.apply(model.particle_q, ref, disp)
+                    self.assertEqual(int(error.numpy()[0]), 0)
+                    self.assertTrue(0. < ccd.fractions.numpy()[moving] < 1.)
+                    results.append(model.particle_q.numpy())
+                np.testing.assert_array_equal(*results)
+
     def test_point_triangle_and_edge_edge_acceptance_for_every_moving_corner(self):
         point_triangle = np.float32([[.25, .25, .25], [0., 0., 0.],
                                      [1., 0., 0.], [0., 1., 0.]])
         edge_edge = np.float32([[-1., 0., .25], [1., 0., .25],
                                 [0., -1., 0.], [0., 1., 0.]])
-        for device, method in product(self.devices, ("direct_rounding", "plane")):
+        for device, method in product(self.devices, ("direct_rounding", "direct_rounding_multi_axis", "plane")):
             for kind, points, triangles, edges in (
                 ("PT", point_triangle, [[1, 2, 3]], []),
                 ("EE", edge_edge, [], [[-1, -1, 0, 1], [-1, -1, 2, 3]]),
@@ -92,6 +146,48 @@ class ColorCcdTests(unittest.TestCase):
                             return np.dot(a - d, np.cross(b - d, c - d))
                         self.assertGreater(volume(points) * volume(accepted), 0.)
                         self.assertEqual(int(error.numpy()[0]), 0)
+
+    def test_multi_axis_recovers_archived_point_triangle_and_clips_a_crossing(self):
+        # Twisting-cloth vertex 298 against face (197, 248, 198) at frame 420.
+        # Its projection is inside the face in FP64; the FP32 classifier picks an edge.
+        points = np.float32([[.173848525, .750686288, .140275568],
+                             [-.146313056, .705313742, .198101282],
+                             [.178657234, .745405734, .143210098],
+                             [.174914464, .747466087, .145759448]])
+        p, a, b, c = points.astype(np.float64)
+        normal = np.cross(b - a, c - a)
+        normal /= np.linalg.norm(normal)
+        if np.dot(p - a, normal) < 0.0:
+            normal = -normal
+        gap = np.dot(p - a, normal)
+        self.assertGreater(gap, .006)
+        targets = (np.float32([.174848497, .749686360, .139275596]),
+                   (p - 2.0 * gap * normal).astype(np.float32))
+        for device, method in product(self.devices, ("direct_rounding", "direct_rounding_multi_axis")):
+            for crossing, target in enumerate(targets):
+                with self.subTest(device=str(device), method=method, crossing=bool(crossing)):
+                    model, _, graph, ccd, error, reference, displacement = workspace(
+                        device, points, [[1, 2, 3]], method=method)
+                    self.assertEqual(int(graph.candidate_count.numpy()[0]), 1)
+                    graph.current_color.fill_(int(graph.colors.numpy()[0]))
+                    motion = np.zeros_like(points)
+                    motion[0] = target - points[0]
+                    displacement.assign(motion)
+                    ccd.apply(model.particle_q, reference, displacement)
+                    self.assertEqual(int(error.numpy()[0]), 0)
+                    actual = model.particle_q.numpy()
+                    fraction = float(ccd.fractions.numpy()[0])
+                    np.testing.assert_array_equal(actual[1:], points[1:])
+                    if method == "direct_rounding":
+                        self.assertEqual(fraction, 0.0)
+                        np.testing.assert_array_equal(actual[0], points[0])
+                    elif crossing:
+                        self.assertGreater(fraction, 0.0)
+                        self.assertLess(fraction, 1.0)
+                        self.assertGreater(np.dot(actual[0].astype(np.float64) - a, normal), 1e-7)
+                    else:
+                        self.assertEqual(fraction, 1.0)
+                        np.testing.assert_array_equal(actual[0], target)
 
     def test_plane_accepts_separated_near_parallel_edges_without_changing_direct_default(self):
         # Parallel edges separated by 15.625 mm. Moving the second edge's
@@ -167,12 +263,17 @@ class ColorCcdTests(unittest.TestCase):
             ColorCcd(None, None, None, None, method="direct_rounding", accept_uncertified=True)
 
     def test_color_method_is_separate_from_predictor_and_validated(self):
-        model = fixture("cpu", predictor=False)
-        model.ipc.params["ccd_method"] = "direct_rounding"
-        own = solver(model, method="plane")
-        self.assertEqual(own.color_ccd.method, "plane")
-        self.assertEqual(own.configuration["color_ccd"]["method"], "plane")
-        self.assertEqual(model.ipc.params["ccd_method"], "direct_rounding")
+        for method in ("plane", "direct_rounding_multi_axis", "motion_projection"):
+            model = fixture("cpu", predictor=False)
+            model.ipc.params["ccd_method"] = "direct_rounding"
+            own = solver(model, method=method)
+            self.assertEqual(own.color_ccd.method, method)
+            self.assertEqual(own.configuration["color_ccd"]["method"], method)
+            if method == "motion_projection":
+                self.assertAlmostEqual(own.configuration["color_ccd"]["moving_point_gap_floor"], 1e-8,
+                                       delta=1e-15)
+                self.assertEqual(own.configuration["color_ccd"]["other_pair_method"], "direct_rounding_multi_axis")
+            self.assertEqual(model.ipc.params["ccd_method"], "direct_rounding")
         for method in ("interval", "bypass", None):
             with self.subTest(method=method), self.assertRaises(ValueError):
                 solver(fixture("cpu", predictor=False), method=method)
@@ -405,7 +506,7 @@ class ColorCcdTests(unittest.TestCase):
         if not devices:
             self.skipTest("No CUDA device")
         from gpu.run import FrameGraph
-        for device, method in product(devices, ("direct_rounding", "plane")):
+        for device, method in product(devices, ("direct_rounding", "direct_rounding_multi_axis", "plane")):
             results = []
             for captured in (False, True):
                 model = fixture(device, predictor=False, height=.02, velocity=(0., 0., -.8))

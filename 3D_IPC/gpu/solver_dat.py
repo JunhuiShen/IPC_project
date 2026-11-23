@@ -13,8 +13,8 @@ The explicit level-based CCD predictor replaces initialization only, reusing
 our GPU implementation. It may run even when collision response in VBD is off.
 The separate ``enable_color_ccd`` option clips actual material color updates
 using independent per-vertex CCD; it leaves contact energy assembly disabled.
-``color_ccd_method`` selects direct_rounding (default) or plane independently
-of the predictor CCD method.
+``color_ccd_method`` selects direct_rounding (default), direct_rounding_multi_axis,
+motion_projection, or plane independently of the predictor CCD method.
 ``enable_color_ccd_contact_forces`` adds live barrier/friction assembly to that
 CCD path without enabling Planar DAT or a second collision detector.
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import warp as wp
 from . import select_newton_runtime
-from .ccd_defaults import LINEAR_CCD_GAP_FLOOR
+from .ccd_defaults import LINEAR_CCD_GAP_FLOOR, MOTION_PROJECTION_POINT_GAP
 
 select_newton_runtime('reference')
 
@@ -234,10 +234,10 @@ class SolverDAT(SolverVBD):
         if local_solve not in ('native','cpu_fp32'):
             raise ValueError("local_solve must be 'native' or 'cpu_fp32'")
         self.local_solve=local_solve
-        if color_ccd_method not in ('direct_rounding','plane'):
-            raise ValueError('color_ccd_method must be direct_rounding or plane')
+        if color_ccd_method not in ('direct_rounding','direct_rounding_multi_axis','motion_projection','plane'):
+            raise ValueError('color_ccd_method must be direct_rounding, direct_rounding_multi_axis, motion_projection, or plane')
         if color_ccd_method != 'direct_rounding' and not enable_color_ccd:
-            raise ValueError('color_ccd_method=plane requires enable_color_ccd=True')
+            raise ValueError(f'color_ccd_method={color_ccd_method} requires enable_color_ccd=True')
         if not isinstance(color_ccd_accept_uncertified, bool):
             raise TypeError('color_ccd_accept_uncertified must be a bool')
         if color_ccd_accept_uncertified and (not enable_color_ccd or color_ccd_method != 'plane'):
@@ -484,6 +484,8 @@ class SolverDAT(SolverVBD):
                 'uncertain_policy':('publish the box-clamped proposal when CCD leaves the vertex stationary'
                     if color_ccd_accept_uncertified else 'rounded-endpoint certificate or stationary update'),
                 'publication':'only current color; accepted reference rebased and rejected displacement discarded'})
+            if color_ccd_method == 'direct_rounding_multi_axis':
+                self.configuration['color_ccd']['retry_axis_selection'] = 'coordinate axes and best geometric axis selected in float64'
             self.configuration['collision_processing']=True
             self.configuration['solver_collision_processing']=True
             self.configuration['mesh_collision_detection']=True
@@ -491,6 +493,13 @@ class SolverDAT(SolverVBD):
             self.configuration['broad_phase_boxes']['bounds_enforced']=True
             self.configuration['algorithm']='native VBD material/local solve with combined coloring and independent per-color CCD'
             self.configuration['motion_acceptance']='blue-box clamp, per-vertex pairwise CCD minimum, endpoint certificate, current-color publication'
+            if color_ccd_method == 'motion_projection':
+                self.configuration['color_ccd'].update({
+                    'moving_point_gap_floor': MOTION_PROJECTION_POINT_GAP,
+                    'other_pair_method': 'direct_rounding_multi_axis',
+                    'moving_point_rule': 'zero at or below clearance; full step for nonpositive projection toward closest point; otherwise clamped projection fraction',
+                    'uncertain_policy': 'moving-point proposal applied directly; other pairs use the rounded-endpoint certificate'})
+                self.configuration['motion_acceptance']='blue-box clamp, per-vertex minimum of moving-point projection and other pair CCD fractions, current-color publication'
             if color_ccd_accept_uncertified:
                 self.configuration['motion_acceptance']+='; accept uncertified box-clamped update if CCD stalls'
             if not self._guess_requested:
