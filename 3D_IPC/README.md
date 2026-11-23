@@ -618,35 +618,19 @@ OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
   --d_hat 0.05 --k_barrier 1e7 --k_sdf 1e10 \
   --node_box_min 0.01 --node_box_max 0.2 \
   --theta_box_min 0.001 --theta_box_max 0.05 --node_box_update_count 5 \
-  --use_simd true \
-  --exact_computation_fallback false \
+  --use_simd true --exact_computation_fallback false \
   --outdir arch_frictionless_output
 
-# Example 21: crank-driven hyperboloid gears (starting settings)
+# Example 21: crank-driven hyperboloid gears
+OMP_NUM_THREADS=64 OMP_DYNAMIC=FALSE OMP_WAIT_POLICY=PASSIVE \
 ./build/3D_sim --example 21 --datadir example_obj \
-  --num_frames 360 --fps 30 --substeps 20 --max_substep_iters 20 --fixed_iters \
+  --num_frames 360 --fps 30 --substeps 10 --max_substep_iters 10 --fixed_iters \
   --hyperboloid_drive_speed 30 --d_hat 0.0001 --k_barrier 1e5 --kpin 1e5 \
+  --node_box_min 5e-6 --node_box_max 0.001 \
+  --theta_box_min 0.0025 --theta_box_max 0.005 --node_box_update_count 10 \
+  --use_simd true --exact_computation_fallback false \
   --outdir hyperboloid_gears_output --format geo
 ```
-
-Example 21 has three rigid bodies: the fused handle, crank, shaft, and first
-gear; the passive second gear; and the fixed stand. One moving spring pin at
-the handle grip pulls it around the shaft. The rigid connection turns the first
-gear, and tooth contact turns the passive gear. Each gear has two stationary
-shaft pins that resist sliding and tilting while allowing shaft rotation.
-Both gears start at rest; the solver updates their poses from pin forces,
-gravity, inertia, and contact. `--hyperboloid_drive_speed`
-sets the crank speed in degrees/second (default 30; zero fixes the crank).
-`--hyperboloid_motor_radius` (default 0.048 m) places the single drive point at
-the grip centre, 0.135 m along the shaft from the hinge. Changing this parameter
-moves the virtual drive point radially and may take it outside the grip.
-`--hyperboloid_shaft_span` (default 0.06 m) sets the shaft support half-span;
-`--kpin` controls both motor and support stiffness. The
-command above shows the scene's starting presets; explicit flags override them.
-The loader converts the authored millimeter, Z-up assembly to meters, Y-up via
-`(x, y, z) -> 0.001 * (x, z, -y)`. Hinge geometry is fixed in the example using
-the bundled `hyperboloid_gears/out/scene.json` values. The loader also accepts
-the updated asset folder named `hyperboloid_gears ` (with a trailing space).
 
 ### DAT scene commands
 
